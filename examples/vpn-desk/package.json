@@ -1,0 +1,17 @@
+{
+  "name": "warren-example-vpn-desk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Warren SDK example: local desktop-style VPN dashboard (trusted Node backend + localhost web UI).",
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@warrenbrowse/sdk-node": "workspace:*"
+  }
+}

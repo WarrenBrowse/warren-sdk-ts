@@ -1,0 +1,134 @@
+name: CI
+
+# Runs on the WarrenBrowse org self-hosted runners, like the sibling SDKs:
+#   [self-hosted, Linux, X64]   -> warren-docker-ci
+#   [self-hosted, macOS, ARM64] -> axiomStudio
+#   [self-hosted, Windows, macstudio-win] -> Windows-ARM VM on the Mac Studio
+# Do not switch to a GitHub-hosted runner.
+#
+# The golden vectors are a private submodule (warren-vectors), fetched over HTTPS
+# with VECTORS_TOKEN. HTTPS (not an SSH deploy key) because the runner fleet is
+# heterogeneous: the Linux docker runner has no `ssh`, and Windows fails the SSH
+# key-permission setup. VECTORS_TOKEN should be a dedicated fine-grained PAT with
+# contents:read on warren-vectors (those cannot be minted via the API, so this is
+# a one-time manual setup).
+#
+# That PAT covers warren-vectors and nothing else, so it is used ONLY for the
+# submodule: the repository itself is checked out with the job's GITHUB_TOKEN,
+# which is always valid for its own repo. Handing the PAT to actions/checkout
+# instead makes every job depend on the PAT's repository list, and a PAT that
+# stopped listing this repo is exactly what broke CI on 2026-07-23 ("Write
+# access to repository not granted", 403 on the main checkout).
+#
+# The native proxy datapath addon (packages/node/native) is NOT built here: it
+# depends on the private engine crates (warren-sdk-rs + warrenguard) via sibling
+# path deps, which a fresh CI checkout cannot reproduce. It is built locally and
+# at release time (see packages/node/native/README.md).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch: {}
+
+jobs:
+  js:
+    name: js (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: [self-hosted, Linux, X64]
+          - name: macos
+            runner: [self-hosted, macOS, ARM64]
+          - name: windows
+            runner: [self-hosted, Windows, macstudio-win]
+    steps:
+      # Self-hosted runners reuse the workspace; force a clean clone so a stray
+      # nested checkout or a stale auth placeholder from a prior run cannot break
+      # the submodule checkout.
+      - name: Reset stale workspace
+        shell: bash
+        # Clear pnpm/action-setup's own install dir too: on a reused self-hosted
+        # Windows runner its cleanup hits ENOTEMPTY on a locked leftover
+        # node_modules, leaving the pnpm shim missing ("batch file cannot be
+        # found"). Removing it up front lets the setup reinstall cleanly.
+        run: |
+          rm -rf .git vectors 2>/dev/null || true
+          rm -rf "$HOME/setup-pnpm" "${USERPROFILE:-/nonexistent}/setup-pnpm" 2>/dev/null || true
+      - uses: actions/checkout@v4
+      - name: Fetch the golden-vectors submodule
+        shell: bash
+        env:
+          VECTORS_TOKEN: ${{ secrets.VECTORS_TOKEN }}
+        # The credential lives in the environment only: never written to the
+        # runner's gitconfig (self-hosted runners are reused) and never in an
+        # argv. `git submodule update` passes it to its child clones.
+        run: |
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="url.https://x-access-token:${VECTORS_TOKEN}@github.com/.insteadOf"
+          export GIT_CONFIG_VALUE_0="https://github.com/"
+          git submodule update --init --recursive
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # Build first so each package's workspace deps resolve their emitted types.
+      - name: Build (tsup, dual ESM + CJS)
+        run: pnpm build
+      - name: Lint (biome)
+        run: pnpm lint
+      - name: Typecheck (tsc)
+        run: pnpm typecheck
+      - name: Test (vitest, replays golden vectors)
+        run: pnpm test
+      # The example extension bundle and example app carry no tests of their
+      # own; validate that they build/parse so they cannot rot silently.
+      - name: Examples (extension bundle + vpn-desk syntax + manifest)
+        shell: bash
+        run: |
+          pnpm --filter @warrenbrowse/sdk-extension build:example
+          node --check examples/vpn-desk/server.mjs
+          node --check examples/vpn-desk/public/app.js
+          node --check packages/extension/example/background.js
+          node --check packages/extension/example/popup.js
+          node -e "JSON.parse(require('node:fs').readFileSync('packages/extension/example/manifest.json','utf8'))"
+
+  coverage:
+    name: coverage
+    runs-on: [self-hosted, Linux, X64]
+    steps:
+      # Self-hosted runners reuse the workspace; force a clean clone so a stray
+      # nested checkout or a stale auth placeholder from a prior run cannot break
+      # the submodule checkout.
+      - name: Reset stale workspace
+        shell: bash
+        run: |
+          rm -rf .git vectors 2>/dev/null || true
+          rm -rf "$HOME/setup-pnpm" "${USERPROFILE:-/nonexistent}/setup-pnpm" 2>/dev/null || true
+      - uses: actions/checkout@v4
+      - name: Fetch the golden-vectors submodule
+        shell: bash
+        env:
+          VECTORS_TOKEN: ${{ secrets.VECTORS_TOKEN }}
+        # The credential lives in the environment only: never written to the
+        # runner's gitconfig (self-hosted runners are reused) and never in an
+        # argv. `git submodule update` passes it to its child clones.
+        run: |
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0="url.https://x-access-token:${VECTORS_TOKEN}@github.com/.insteadOf"
+          export GIT_CONFIG_VALUE_0="https://github.com/"
+          git submodule update --init --recursive
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Coverage (vitest v8, thresholds enforced)
+        run: pnpm coverage

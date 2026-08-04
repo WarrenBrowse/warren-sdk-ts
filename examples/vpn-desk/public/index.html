@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Warren VPN</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="card">
+      <header class="card-header">
+        <div class="emblem" aria-hidden="true">
+          <!-- Burrow arch: a warren entrance in copper -->
+          <svg viewBox="0 0 48 34" role="img" focusable="false">
+            <path
+              d="M6 32 C6 15, 14 4, 24 4 C34 4, 42 15, 42 32"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="4.5"
+              stroke-linecap="round"
+            />
+            <ellipse cx="24" cy="32" rx="9" ry="2.4" fill="currentColor" opacity="0.55" />
+          </svg>
+        </div>
+        <h1>Warren</h1>
+        <p class="subtitle">Private VPN</p>
+      </header>
+
+      <div class="status-line" aria-live="polite">
+        <span id="status-dot" class="dot dot-disconnected" aria-hidden="true"></span>
+        <span id="status-text">Disconnected</span>
+      </div>
+
+      <div class="connect-well">
+        <button id="connect-btn" class="connect-btn" type="button" aria-label="Connect">
+          <span id="connect-btn-label">Connect</span>
+        </button>
+      </div>
+
+      <p id="error-line" class="error-line" role="alert" hidden></p>
+      <p id="datapath-note" class="note" hidden>
+        The native datapath addon is not built: control-plane only mode. You can browse exits,
+        but connecting is disabled. See the README to build the addon.
+      </p>
+
+      <div class="field">
+        <label for="country-select">Location</label>
+        <select id="country-select">
+          <option value="">Fastest (auto)</option>
+        </select>
+      </div>
+
+      <section id="endpoints-panel" class="endpoints" hidden>
+        <div class="endpoint-row">
+          <span class="endpoint-label">SOCKS5</span>
+          <code id="socks5-addr"></code>
+          <button type="button" class="copy-btn" data-copy="socks5-addr" aria-label="Copy SOCKS5 address">Copy</button>
+        </div>
+        <div class="endpoint-row" id="http-row" hidden>
+          <span class="endpoint-label">HTTP</span>
+          <code id="http-addr"></code>
+          <button type="button" class="copy-btn" data-copy="http-addr" aria-label="Copy HTTP proxy address">Copy</button>
+        </div>
+      </section>
+
+      <details class="advanced">
+        <summary>
+          <span class="summary-text">Advanced</span>
+          <span class="chevron" aria-hidden="true"></span>
+        </summary>
+        <div class="advanced-body">
+          <div class="field">
+            <label for="exit-select">Exact exit</label>
+            <select id="exit-select">
+              <option value="">Auto (follow location)</option>
+            </select>
+          </div>
+          <div class="toggles">
+            <label class="toggle"><input type="checkbox" id="opt-http" /> HTTP proxy</label>
+            <label class="toggle"><input type="checkbox" id="opt-daita" /> DAITA defense</label>
+            <label class="toggle"><input type="checkbox" id="opt-ipv6" /> Request IPv6</label>
+          </div>
+          <section id="metrics-panel" class="metrics" hidden>
+            <h2>Live metrics</h2>
+            <dl>
+              <div class="stat"><dt>Sent</dt><dd id="m-sent">-</dd></div>
+              <div class="stat"><dt>Received</dt><dd id="m-recv">-</dd></div>
+              <div class="stat"><dt>Packets</dt><dd id="m-packets">-</dd></div>
+              <div class="stat"><dt>Uptime</dt><dd id="m-uptime">-</dd></div>
+            </dl>
+          </section>
+        </div>
+      </details>
+
+      <footer class="footer">
+        <span id="account-address" title="Account address"></span>
+      </footer>
+    </main>
+    <script src="/app.js"></script>
+  </body>
+</html>

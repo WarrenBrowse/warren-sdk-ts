@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <main class="card">
+      <header class="card-header">
+        <span class="emblem" aria-hidden="true">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path
+              d="M4 27V15a12 12 0 0 1 24 0v12"
+              stroke="currentColor"
+              stroke-width="3"
+              stroke-linecap="round"
+            />
+            <circle cx="16" cy="17" r="3.2" fill="currentColor" />
+          </svg>
+        </span>
+        <h1>Warren</h1>
+        <p class="subtitle">Private VPN</p>
+      </header>
+
+      <section id="unlock-view" hidden>
+        <label class="field"><span>Unlock your wallet</span>
+          <input id="password" type="password" autocomplete="current-password" />
+        </label>
+        <button id="unlock-btn" class="btn-primary" type="button">Unlock</button>
+      </section>
+
+      <section id="onboard-view" hidden>
+        <p class="note">No wallet on this device yet.</p>
+        <button id="onboard-btn" class="btn-primary" type="button">Set up your wallet</button>
+      </section>
+
+      <div id="vpn-view" hidden>
+        <div class="status-line">
+          <span id="dot" class="dot dot-disconnected"></span>
+          <span id="state" aria-live="polite">Disconnected</span>
+        </div>
+
+        <div class="connect-well">
+          <button id="toggle" class="connect-btn" type="button">Connect</button>
+        </div>
+      </div>
+
+      <p id="error" class="error-line" role="alert" hidden></p>
+
+      <label class="field">
+        <span>Location</span>
+        <select id="country">
+          <option value="">Fastest (auto)</option>
+        </select>
+      </label>
+
+      <details class="advanced">
+        <summary>Advanced</summary>
+        <div class="advanced-body">
+          <label class="field">
+            <span>Split tunneling</span>
+            <select id="split-mode">
+              <option value="all">Everything through Warren</option>
+              <option value="bypass">Tunnel all, except these sites</option>
+              <option value="only">Only these sites through Warren</option>
+            </select>
+          </label>
+          <label class="field" id="rules-field" hidden>
+            <span>Sites (one host per line)</span>
+            <textarea id="split-rules" rows="3" placeholder="example.com&#10;*.corp.example"></textarea>
+          </label>
+        </div>
+      </details>
+
+      <footer id="address" class="address"></footer>
+    </main>
+    <script src="popup.js"></script>
+  </body>
+</html>

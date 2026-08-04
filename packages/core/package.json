@@ -1,0 +1,38 @@
+{
+  "name": "@warrenbrowse/sdk-core",
+  "version": "0.0.0",
+  "description": "Pure-TypeScript control plane for the Warren VPN: identity, SS58, request signing. Isomorphic (Node + browser).",
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": ["dist", "src"],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^1",
+    "@noble/curves": "^1",
+    "@noble/hashes": "^1",
+    "@noble/post-quantum": "0.4.1",
+    "@scure/base": "^1",
+    "@scure/bip39": "^1"
+  }
+}

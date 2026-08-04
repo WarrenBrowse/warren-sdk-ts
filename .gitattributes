@@ -1,0 +1,5 @@
+# Biome formats to LF. Force LF checkouts everywhere so a Windows git with
+# core.autocrlf cannot rewrite the tree into formatter violations (the js
+# (windows) CI job failed on every run because of this).
+* text=auto eol=lf
+*.node binary

@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Set up Warren</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body class="onboarding">
+    <main class="card wide">
+      <header class="card-header">
+        <span class="emblem" aria-hidden="true">
+          <svg viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M4 27V15a12 12 0 0 1 24 0v12" stroke="currentColor" stroke-width="3" stroke-linecap="round" />
+            <circle cx="16" cy="17" r="3.2" fill="currentColor" />
+          </svg>
+        </span>
+        <h1>Warren</h1>
+        <p class="subtitle">Set up your wallet</p>
+      </header>
+
+      <section id="step-choice" class="step">
+        <p class="note">Your wallet is your account. It stays encrypted on this device and never leaves it.</p>
+        <button id="btn-create" class="btn-primary" type="button">Create a new wallet</button>
+        <button id="btn-import" class="btn-ghost" type="button">Import a recovery phrase</button>
+      </section>
+
+      <section id="step-password" class="step" hidden>
+        <label class="field"><span>Password</span>
+          <input id="pw1" type="password" autocomplete="new-password" />
+        </label>
+        <label class="field"><span>Confirm password</span>
+          <input id="pw2" type="password" autocomplete="new-password" />
+        </label>
+        <label class="field" id="import-field" hidden><span>Recovery phrase (12 or 24 words)</span>
+          <textarea id="import-mnemonic" rows="3"></textarea>
+        </label>
+        <p id="pw-error" class="error-line" role="alert" hidden></p>
+        <button id="btn-password-next" class="btn-primary" type="button">Continue</button>
+      </section>
+
+      <section id="step-backup" class="step" hidden>
+        <p class="note">Write these 12 words down in order and keep them safe. They are the only way to recover your wallet. Warren cannot restore them.</p>
+        <ol id="seed-words" class="seed-grid"></ol>
+        <label class="check"><input id="ack" type="checkbox" /> I have written down my recovery phrase</label>
+        <button id="btn-done" class="btn-primary" type="button" disabled>Done</button>
+      </section>
+
+      <section id="step-final" class="step" hidden>
+        <p class="note">Your wallet is ready. Open the Warren extension icon to connect.</p>
+        <p id="final-address" class="address"></p>
+      </section>
+    </main>
+    <script src="onboarding.js"></script>
+  </body>
+</html>

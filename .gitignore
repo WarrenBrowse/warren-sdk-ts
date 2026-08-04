@@ -1,0 +1,13 @@
+node_modules/
+dist/
+# napi build regenerates a dts on every build (empty on cached builds); the
+# tracked index.d.ts is curated by hand, so builds route their output here.
+packages/node/native/warren-napi/index.generated.d.ts
+coverage/
+*.tsbuildinfo
+.DS_Store
+*.log
+packages/extension/example/sdk-extension.js
+
+# stray CLI-arg artifacts
+/--help

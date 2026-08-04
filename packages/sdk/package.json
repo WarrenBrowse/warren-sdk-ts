@@ -1,0 +1,33 @@
+{
+  "name": "@warrenbrowse/sdk",
+  "version": "0.0.0",
+  "description": "Warren VPN TypeScript SDK: app-facing facade. Re-exports the control plane; datapath wiring lands with the native packages.",
+  "type": "module",
+  "license": "AGPL-3.0-or-later",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": ["dist", "src"],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsup"
+  },
+  "dependencies": {
+    "@warrenbrowse/sdk-core": "workspace:*"
+  }
+}

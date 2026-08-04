@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Warren VPN (example)",
+  "version": "0.1.0",
+  "description": "Routes this browser through a Warren tunnel via the local native host.",
+  "permissions": ["proxy", "privacy", "nativeMessaging", "storage"],
+  "background": {
+    "service_worker": "background.js",
+    "scripts": ["background.js"],
+    "type": "module"
+  },
+  "action": { "default_popup": "popup.html", "default_title": "Warren VPN" },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self';"
+  },
+  "externally_connectable": { "ids": [] },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "warren-example@warrenbrowse.com",
+      "strict_min_version": "128.0",
+      "data_collection_permissions": { "required": ["none"] }
+    }
+  }
+}

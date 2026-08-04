@@ -1,0 +1,126 @@
+# Builds the native proxy datapath addon (packages/node/native/warren-napi)
+# for every platform the team runs Claude Code on, so `wclaude` installs
+# without a local Rust toolchain. Runs on the org self-hosted fleet (the only
+# runners with access to the private engine repos).
+#
+# Needs the ENGINE_TOKEN secret: a fine-grained PAT with contents:read on
+# WarrenBrowse/warren-sdk-rs, warrenguard and warren-contract (same one-time
+# manual setup as VECTORS_TOKEN; those PATs cannot be minted via the API).
+#
+# The warren-napi Cargo.toml resolves the engine through sibling checkouts
+# five levels up, exactly like the local dev layout, so the engine repos are
+# checked out as siblings of this repo's checkout directory.
+#
+# Binaries are published as assets on the rolling `native-prebuilds` release,
+# NOT as Actions artifacts: the org artifact storage quota is exhausted (hit
+# 2026-07-09) and release assets neither count against it nor expire.
+
+name: native-prebuilds
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: addon (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The plain [Linux, X64] docker runner is JS-only (no rustup); the
+          # rosetta runner is the one the engine CI compiles Rust on.
+          - name: linux-x64
+            runner: [self-hosted, Linux, X64, macstudio-rosetta]
+            target: x86_64-unknown-linux-gnu
+          - name: darwin-arm64
+            runner: [self-hosted, macOS, ARM64]
+            target: aarch64-apple-darwin
+          - name: win32-x64
+            runner: [self-hosted, Windows, macstudio-win]
+            target: x86_64-pc-windows-msvc
+    steps:
+      - name: Reset stale workspace
+        shell: bash
+        # Clear pnpm/action-setup's install dir too: on a reused self-hosted
+        # Windows runner its cleanup hits ENOTEMPTY on a locked leftover
+        # node_modules and the whole leg dies before the build. Removing it up
+        # front lets the setup reinstall cleanly.
+        run: |
+          rm -rf .git sdk-ts engine 2>/dev/null || true
+          rm -rf "$HOME/setup-pnpm" "${USERPROFILE:-/nonexistent}/setup-pnpm" 2>/dev/null || true
+      - uses: actions/checkout@v4
+        with:
+          path: sdk-ts
+      - uses: actions/checkout@v4
+        with:
+          repository: WarrenBrowse/warren-sdk-rs
+          token: ${{ secrets.ENGINE_TOKEN }}
+          path: warren-sdk-rs
+      - uses: actions/checkout@v4
+        with:
+          repository: WarrenBrowse/warrenguard
+          token: ${{ secrets.ENGINE_TOKEN }}
+          path: warrenguard
+      - uses: actions/checkout@v4
+        with:
+          repository: WarrenBrowse/warren-contract
+          token: ${{ secrets.ENGINE_TOKEN }}
+          path: warren-contract
+      # The Cargo patch table resolves ../../../../../<repo> from the crate dir,
+      # which is the parent of the sdk-ts checkout: move the siblings there.
+      - name: Lay out engine siblings
+        shell: bash
+        run: |
+          ls sdk-ts/packages/node/native/warren-napi/Cargo.toml
+          test -d warren-sdk-rs && test -d warrenguard && test -d warren-contract
+      - uses: pnpm/action-setup@v4
+        with:
+          package_json_file: sdk-ts/package.json
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # Install the pinned toolchain on every runner: the rosetta Linux runner
+      # has no ambient rustup, and the macOS ARM64 runner has rust but not
+      # rustup on this job's PATH (a bare `rustup target add` there fails with
+      # "command not found"). dtolnay provides rustup + the host target on all.
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          targets: ${{ matrix.target }}
+      - name: Rust target
+        shell: bash
+        run: rustup target add ${{ matrix.target }} || true
+      - name: Build addon
+        shell: bash
+        working-directory: sdk-ts/packages/node/native/warren-napi
+        run: |
+          # --dts keeps the generated typings away from the curated index.d.ts
+          # (napi's default output path, left empty on cached builds).
+          pnpm --package=@napi-rs/cli dlx napi build --release --platform --target ${{ matrix.target }} --dts index.generated.d.ts
+          ls -la *.node
+      # napi suffixes some triples with the ABI (linux-x64-gnu, win32-x64-msvc);
+      # normalize to the loader's `<process.platform>-<process.arch>` name.
+      - name: Normalize binary name
+        shell: bash
+        working-directory: sdk-ts/packages/node/native/warren-napi
+        run: |
+          src="$(ls warren-napi.*.node | head -1)"
+          test -n "$src"
+          if [ "$src" != "warren-napi.${{ matrix.name }}.node" ]; then
+            mv "$src" "warren-napi.${{ matrix.name }}.node"
+          fi
+          ls -la warren-napi.${{ matrix.name }}.node
+      # Node-based publish: the Windows runner has no gh CLI, and Actions
+      # artifacts are unusable (org storage quota). (The wclaude launcher moved
+      # to its own repo WarrenBrowse/wclaude with its own build workflow.)
+      - name: Publish to the rolling release
+        shell: bash
+        working-directory: sdk-ts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/publish-prebuild.mjs native-prebuilds \
+            "packages/node/native/warren-napi/warren-napi.${{ matrix.name }}.node"

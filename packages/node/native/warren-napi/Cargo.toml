@@ -1,0 +1,44 @@
+[package]
+name = "warren_napi"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", default-features = false, features = ["napi8", "tokio_rt"] }
+napi-derive = "2"
+tokio = { version = "1", features = ["sync"] }
+hex = "0.4"
+# The Warren engine. Releases pin it by git tag (as the Dart SDK pins warren-sdk);
+# this sibling-checkout path is the local co-development form.
+warren-sdk = { path = "../../../../../warren-sdk-rs/crates/warren-sdk" }
+
+[build-dependencies]
+napi-build = "2"
+
+# Mirror of warren-sdk-rs's workspace `[patch]` table. The engine and contract
+# crates are git deps of warren-sdk-rs, but warren-contract references
+# warrenguard-wire by a relative path, so it only resolves when both are patched
+# to their sibling checkouts. warren-sdk-rs applies these patches in its own
+# workspace root; this package sits outside that workspace (path dep on
+# warren-sdk) and does not inherit them, so it must repeat them here. Keep in
+# lockstep with warren-sdk-rs/Cargo.toml.
+[patch."https://github.com/WarrenBrowse/warrenguard.git"]
+warrenguard-wire = { path = "../../../../../warrenguard/crates/warrenguard-wire" }
+warrenguard-identity = { path = "../../../../../warrenguard/crates/warrenguard-identity" }
+warrenguard-multihop = { path = "../../../../../warrenguard/crates/warrenguard-multihop" }
+warrenguard-daita = { path = "../../../../../warrenguard/crates/warrenguard-daita" }
+warrenguard-tls = { path = "../../../../../warrenguard/crates/warrenguard-tls" }
+warrenguard-natpmp-protocol = { path = "../../../../../warrenguard/crates/warrenguard-natpmp-protocol" }
+warrenguard-tun-core = { path = "../../../../../warrenguard/crates/warrenguard-tun-core" }
+warrenguard-tun-device = { path = "../../../../../warrenguard/crates/warrenguard-tun-device" }
+warrenguard-backoff = { path = "../../../../../warrenguard/crates/warrenguard-backoff" }
+warrenguard-transport = { path = "../../../../../warrenguard/crates/warrenguard-transport" }
+warrenguard-transport-core = { path = "../../../../../warrenguard/crates/warrenguard-transport-core" }
+
+[patch."https://github.com/WarrenBrowse/warren-contract.git"]
+warren-contract = { path = "../../../../../warren-contract" }
+warren-discovery-core = { path = "../../../../../warren-contract/warren-discovery" }
