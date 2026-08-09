@@ -1,6 +1,6 @@
 # warren-sdk-ts
 
-Standalone TypeScript client SDK for the [Warren VPN](https://warrenbrowse.com).
+Standalone TypeScript client SDK for the [Warren VPN](https://warren.ro).
 Sibling of the reference implementation `warren-sdk-rs` and of `warren-sdk-dart`.
 
 This SDK is a clean-room, wire-compatible reimplementation of the Warren client
