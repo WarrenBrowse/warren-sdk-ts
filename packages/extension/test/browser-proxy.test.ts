@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { type BrowserProxyChrome, WarrenBrowserProxy, WarrenExtensionError } from '../src/index.js';
+import {
+  type BrowserProxyChrome,
+  WarrenBrowserProxy,
+  WarrenExtensionError,
+  encodeBrowserProxyCredential,
+} from '../src/index.js';
 
 interface Recorded {
   calls: string[];
@@ -203,5 +208,16 @@ describe('WarrenBrowserProxy on Firefox', () => {
 
     expect(rec.proxyRequestListener).toBeUndefined();
     expect(proxy.isProxied()).toBe(false);
+  });
+});
+
+describe('encodeBrowserProxyCredential', () => {
+  it('encodes a token as unpadded base64url, which the ingress decodes', () => {
+    // Padding and the `+/` alphabet would not survive a Basic credential's
+    // string round trip through the browser.
+    const encoded = encodeBrowserProxyCredential(Uint8Array.from([251, 255, 190, 0, 1]));
+
+    expect(encoded).toBe('-_--AAE');
+    expect(encoded).not.toContain('=');
   });
 });

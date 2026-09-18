@@ -36,7 +36,20 @@
  * back as `http`, which would send every CONNECT in clear.
  */
 
+import { base64urlnopad } from '@scure/base';
 import { WarrenExtensionError } from './client.js';
+
+/**
+ * Encodes one pre-minted browser-proxy credential for the wire.
+ *
+ * The password half of a Basic credential travels through a browser as a
+ * string, so the token is base64url-encoded rather than raw; the ingress
+ * decodes exactly this. Keeping the encoding here rather than in the product
+ * repo keeps one definition of it on both sides of the wire.
+ */
+export function encodeBrowserProxyCredential(token: Uint8Array): string {
+  return base64urlnopad.encode(token);
+}
 
 /** Where the CONNECT ingress listens. The host must be a name the browser can
  * validate a certificate for, so it is the node's public cover domain. */

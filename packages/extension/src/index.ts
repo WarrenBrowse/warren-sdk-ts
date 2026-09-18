@@ -56,6 +56,7 @@ export {
 } from './keyring.js';
 export {
   WarrenBrowserProxy,
+  encodeBrowserProxyCredential,
   type BrowserProxyChrome,
   type BrowserProxyConnectOptions,
   type BrowserProxyEndpoint,
