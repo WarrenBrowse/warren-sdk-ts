@@ -56,6 +56,9 @@ importers:
 
   packages/extension:
     dependencies:
+      '@scure/base':
+        specifier: ^1
+        version: 1.2.6
       '@warrenbrowse/sdk-core':
         specifier: workspace:*
         version: link:../core
