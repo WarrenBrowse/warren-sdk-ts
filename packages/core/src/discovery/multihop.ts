@@ -56,6 +56,12 @@ export interface VerifiedExit {
    * well-known `WARREN_EDGE_PORT` (8443, see `../edge/well-known.js`). Absent
    * when the node has no edge. */
   readonly edgeCertSha256?: string;
+  /** The node's public cover domain, the hostname a browser dials for the
+   * CONNECT proxy tier and validates its certificate against. Carried by the
+   * server-signed envelope, the same trust tier as {@link edgeCertSha256}: the
+   * per-node exit signature does not cover it. Absent when the node publishes
+   * no cover domain, in which case there is no name to point a browser at. */
+  readonly coverDomain?: string;
   /** Lowercase hex of the exit's ML-KEM-768 recipient key (the X-Wing hybrid
    * seal half), present ONLY when the PQ operational signature bound it. A key
    * a classical signature merely transported is never surfaced: it would be
@@ -541,6 +547,7 @@ export function verifyMultihopDirectory(
       weight: n.weight,
       dnsDisabled: vouch.dnsDisabled,
       ...(n.edge_cert_sha256 !== undefined ? { edgeCertSha256: n.edge_cert_sha256 } : {}),
+      ...(n.exit.cover_domain !== undefined ? { coverDomain: n.exit.cover_domain } : {}),
       ...(vouch.exitMlkem768PubkeyHex !== undefined
         ? { exitMlkem768PubkeyHex: vouch.exitMlkem768PubkeyHex }
         : {}),

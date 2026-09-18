@@ -226,6 +226,35 @@ export class WarrenApiClient {
     };
   }
 
+  /**
+   * A {@link TokenTransport} for the BROWSER-PROXY credential class
+   * (`/v1/browser-proxy/*`, warren-core doc 103).
+   *
+   * A separate lane, not a convenience: issuance is once per account, class and
+   * epoch and always delivers the whole batch, so a browser minting through
+   * {@link tokenTransport} would find every epoch already taken by whichever
+   * client refreshed first (typically the desktop app) and never obtain a
+   * credential. The two lanes also use different issuer keys, so a credential
+   * minted here cannot admit a tunnel session.
+   */
+  browserProxyTokenTransport(): TokenTransport {
+    return {
+      getDirectory: async () =>
+        this.json(
+          this.expectOk(await this.request('GET', '/v1/browser-proxy/keys', { signed: false })),
+        ),
+      issue: async (req) =>
+        this.json(
+          this.expectOk(
+            await this.request('POST', '/v1/browser-proxy/issue', {
+              body: JSON.stringify(req),
+              signed: true,
+            }),
+          ),
+        ),
+    };
+  }
+
   private async request(
     method: string,
     path: string,

@@ -38,6 +38,8 @@ interface NodeOpts {
   mlkemEkHex?: string;
   /** v10 TLS-over-TCP carrier flag on the relay descriptor (after cover_domain). */
   relayTcpFallback?: boolean;
+  /** The exit's cover domain, the name a browser proxy dials and validates. */
+  coverDomain?: string;
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: a freely-mutable wire object for minting test fixtures.
@@ -69,6 +71,8 @@ function node(op: Uint8Array, tag: number, country: string, asn: number, o: Node
     exit_ed25519_pubkey: bytesToHex(exitEd),
     exit_x25519_multihop_pubkey: bytesToHex(exitX),
     endpoint,
+    // Frozen between endpoint and signature, matching the Rust serde order.
+    ...(o.coverDomain !== undefined ? { cover_domain: o.coverDomain } : {}),
     signature: exitSig,
   };
   if (dns) exit.dns_disabled = true;
@@ -360,6 +364,35 @@ describe('verifyMultihopDirectory edge cert pin (server-envelope tier)', () => {
   it('rejects a swapped edge cert pin (proves it is inside the server envelope)', () => {
     const json = mint(ROOT, OP, SERVER, [node(OP, 10, 'RO', 100, { edgeCertSha256: pin })]);
     const tampered = json.replace(pin, 'cd'.repeat(32));
+    expect(expectError(() => verifyMultihopDirectory(tampered, [serverPin])).code).toBe(
+      'bad_envelope_signature',
+    );
+  });
+
+  it('surfaces the exit cover domain, the name a browser proxy dials', () => {
+    const json = mint(ROOT, OP, SERVER, [
+      node(OP, 10, 'RO', 100, { coverDomain: 'ro1.edge.example.net' }),
+    ]);
+
+    const dir = verifyMultihopDirectory(json, [serverPin], [rootPin]);
+
+    expect(dir.exits[0]!.coverDomain).toBe('ro1.edge.example.net');
+  });
+
+  it('leaves the cover domain absent when the node publishes none', () => {
+    const json = mint(ROOT, OP, SERVER, [node(OP, 10, 'RO', 100)]);
+
+    const dir = verifyMultihopDirectory(json, [serverPin], [rootPin]);
+
+    expect(dir.exits[0]!.coverDomain).toBeUndefined();
+  });
+
+  it('rejects a swapped cover domain (the browser would send its credential there)', () => {
+    const json = mint(ROOT, OP, SERVER, [
+      node(OP, 10, 'RO', 100, { coverDomain: 'ro1.edge.example.net' }),
+    ]);
+    const tampered = json.replace('ro1.edge.example.net', 'evil.example.net');
+
     expect(expectError(() => verifyMultihopDirectory(tampered, [serverPin])).code).toBe(
       'bad_envelope_signature',
     );

@@ -55,6 +55,15 @@ export {
   type KeyringStorageArea,
 } from './keyring.js';
 export {
+  WarrenBrowserProxy,
+  type BrowserProxyChrome,
+  type BrowserProxyConnectOptions,
+  type BrowserProxyEndpoint,
+  type BrowserProxyPlatform,
+  type BrowserProxySettingsLike,
+  type WarrenBrowserProxyOptions,
+} from './browser-proxy.js';
+export {
   TOKEN_BUNDLE_KEY,
   openTokenStore,
   type TokenStorageArea,

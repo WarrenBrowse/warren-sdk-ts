@@ -459,3 +459,49 @@ describe('randomNonceHex', () => {
     expect(a).not.toBe(b);
   });
 });
+
+describe('browserProxyTokenTransport', () => {
+  // The browser-proxy tier mints out of its own issuance lane (warren-core doc
+  // 103): a transport pointed at the session endpoints would take the account's
+  // session slot, which is the starvation the separate class exists to avoid.
+  it('reads the issuer directory of the browser-proxy class', async () => {
+    const { transport, requests } = recordingTransport(() => ok('{"keys":[]}'));
+    const client = new WarrenApiClient({
+      baseUrl: 'https://api.example.com',
+      seed: SEED,
+      transport,
+    });
+
+    await client.browserProxyTokenTransport().getDirectory();
+
+    expect(requests[0]?.url).toBe('https://api.example.com/v1/browser-proxy/keys');
+  });
+
+  it('signs issuance against the browser-proxy endpoint', async () => {
+    const { transport, requests } = recordingTransport(() => ok('{"epochs":[]}'));
+    const client = new WarrenApiClient({
+      baseUrl: 'https://api.example.com',
+      seed: SEED,
+      transport,
+    });
+
+    await client.browserProxyTokenTransport().issue({ epochs: [] });
+
+    expect(requests[0]?.url).toBe('https://api.example.com/v1/browser-proxy/issue');
+    expect(requests[0]?.method).toBe('POST');
+    expect(header(requests[0], 'X-Warren-PubKey')).toBe(SEED_ADDRESS);
+  });
+
+  it('keeps the session transport on the session endpoints', async () => {
+    const { transport, requests } = recordingTransport(() => ok('{"keys":[]}'));
+    const client = new WarrenApiClient({
+      baseUrl: 'https://api.example.com',
+      seed: SEED,
+      transport,
+    });
+
+    await client.tokenTransport().getDirectory();
+
+    expect(requests[0]?.url).toBe('https://api.example.com/v1/tokens/keys');
+  });
+});
