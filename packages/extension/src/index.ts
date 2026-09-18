@@ -64,6 +64,7 @@ export {
   type WarrenBrowserProxyOptions,
 } from './browser-proxy.js';
 export {
+  BROWSER_PROXY_BUNDLE_KEY,
   TOKEN_BUNDLE_KEY,
   openTokenStore,
   type TokenStorageArea,

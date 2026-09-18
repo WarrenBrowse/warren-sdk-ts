@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { TOKEN_BUNDLE_KEY, openTokenStore } from '../src/token-store.js';
+import { BROWSER_PROXY_BUNDLE_KEY, TOKEN_BUNDLE_KEY, openTokenStore } from '../src/token-store.js';
 
 /** A `chrome.storage` area stand-in: the boundary this module exists to cross. */
 function fakeArea(initial: Record<string, unknown> = {}) {
@@ -98,5 +98,30 @@ describe('openTokenStore', () => {
     await store.flush();
 
     expect(area.items[TOKEN_BUNDLE_KEY]).toBe('{"v":1,"n":3}');
+  });
+});
+
+describe('openTokenStore with an explicit key', () => {
+  it('keeps two credential classes in separate bundles', async () => {
+    // One store for both classes would vend a session token to the browser
+    // proxy, which every ingress refuses.
+    const area = fakeArea();
+    const session = await openTokenStore(area, TOKEN_BUNDLE_KEY);
+    const browser = await openTokenStore(area, BROWSER_PROXY_BUNDLE_KEY);
+
+    session.persistence.save('{"v":1,"which":"session"}');
+    browser.persistence.save('{"v":1,"which":"browser"}');
+    await Promise.all([session.flush(), browser.flush()]);
+
+    expect(area.items[TOKEN_BUNDLE_KEY]).toBe('{"v":1,"which":"session"}');
+    expect(area.items[BROWSER_PROXY_BUNDLE_KEY]).toBe('{"v":1,"which":"browser"}');
+  });
+
+  it('hydrates from the key it was given', async () => {
+    const area = fakeArea({ [BROWSER_PROXY_BUNDLE_KEY]: '{"v":1,"browser":true}' });
+
+    const store = await openTokenStore(area, BROWSER_PROXY_BUNDLE_KEY);
+
+    expect(store.persistence.load()).toBe('{"v":1,"browser":true}');
   });
 });

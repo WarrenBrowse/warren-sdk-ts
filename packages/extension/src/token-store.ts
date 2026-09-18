@@ -23,8 +23,14 @@
 
 import type { TokenPersistence } from '@warrenbrowse/sdk-core';
 
-/** Storage key holding the serialized token bundle. */
+/** Storage key holding the serialized session-token bundle. */
 export const TOKEN_BUNDLE_KEY = 'warren.tokenBundle';
+
+/** Storage key for the browser-proxy credential bundle. A key of its own
+ * because the two credential classes are minted from different issuer keys and
+ * spent at different places: one store holding both would vend a session token
+ * to the proxy, which every ingress refuses. */
+export const BROWSER_PROXY_BUNDLE_KEY = 'warren.browserProxyBundle';
 
 /** The `chrome.storage` surface this module needs (promise flavour). */
 export interface TokenStorageArea {
@@ -42,16 +48,19 @@ export interface TokenStore {
 }
 
 /**
- * Reads the persisted bundle and returns a {@link TokenPersistence} over it.
+ * Reads the bundle at `key` and returns a {@link TokenPersistence} over it.
  *
  * Never throws: an unreadable area yields an empty store, which the manager
  * treats as "nothing pre-minted" and heals on its next refresh.
  */
-export async function openTokenStore(area: TokenStorageArea): Promise<TokenStore> {
+export async function openTokenStore(
+  area: TokenStorageArea,
+  key: string = TOKEN_BUNDLE_KEY,
+): Promise<TokenStore> {
   let bundle: string | undefined;
   try {
-    const got = await area.get(TOKEN_BUNDLE_KEY);
-    const value = got[TOKEN_BUNDLE_KEY];
+    const got = await area.get(key);
+    const value = got[key];
     if (typeof value === 'string') bundle = value;
   } catch {
     // Unreadable storage is indistinguishable from an empty one for our
@@ -67,7 +76,7 @@ export async function openTokenStore(area: TokenStorageArea): Promise<TokenStore
     save: (serialized: string) => {
       bundle = serialized;
       queue = queue.then(() =>
-        area.set({ [TOKEN_BUNDLE_KEY]: serialized }).catch(() => {
+        area.set({ [key]: serialized }).catch(() => {
           // Kept in memory above; the next save rewrites the whole bundle.
         }),
       );
