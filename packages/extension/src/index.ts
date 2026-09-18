@@ -55,6 +55,12 @@ export {
   type KeyringStorageArea,
 } from './keyring.js';
 export {
+  TOKEN_BUNDLE_KEY,
+  openTokenStore,
+  type TokenStorageArea,
+  type TokenStore,
+} from './token-store.js';
+export {
   connectEdgeTunnel,
   connectEdgeTunnelToExit,
   WarrenEdgeConnection,
