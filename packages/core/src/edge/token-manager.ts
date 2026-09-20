@@ -163,15 +163,30 @@ export class TokenManager {
    * wallet-signed path. NEVER mints (no issuer call at connect).
    */
   takeCurrentStack(nowUnixSecs: number): Uint8Array[] {
-    const epochSecs = this.epochSecs;
-    if (epochSecs === undefined || epochSecs <= 0) return [];
-    const epoch = Math.floor(nowUnixSecs / epochSecs);
+    const epoch = this.epochAt(nowUnixSecs);
+    if (epoch === undefined) return [];
     const tokens = this.store.get(epoch);
     if (!tokens || tokens.length === 0) return [];
     const token = tokens.pop();
     if (tokens.length === 0) this.store.delete(epoch);
     this.persist();
     return token ? [token] : [];
+  }
+
+  /**
+   * The epoch `nowUnixSecs` falls in, or `undefined` before a refresh (or a
+   * persisted bundle) has taught the manager the published epoch length.
+   *
+   * A caller that must not spend a token per attempt uses this to know how
+   * long the token it already holds stays the right one. The browser-proxy
+   * tier is the case that needs it: the issuer grants a handful of credentials
+   * for the whole epoch, so spending one per reconnect empties the account
+   * after a few toggles of the same hour.
+   */
+  epochAt(nowUnixSecs: number): number | undefined {
+    const epochSecs = this.epochSecs;
+    if (epochSecs === undefined || epochSecs <= 0) return undefined;
+    return Math.floor(nowUnixSecs / epochSecs);
   }
 
   /** Tokens currently available for `epoch` (test/observability). */

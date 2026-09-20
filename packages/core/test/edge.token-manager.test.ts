@@ -150,6 +150,14 @@ describe('TokenManager mint timing (decorrelated from redemption)', () => {
     const mgr = new TokenManager(offlineTransport);
     expect(mgr.takeCurrentStack(NOW)).toEqual([]);
   });
+
+  it('reports the epoch a moment falls in, so a caller can cache what it spent', async () => {
+    const mgr = new TokenManager(fakeTransport({ epochs: [EPOCH], counts: new Map() }));
+    expect(mgr.epochAt(NOW)).toBeUndefined();
+    await mgr.refresh(NOW);
+    expect(mgr.epochAt(NOW)).toBe(EPOCH);
+    expect(mgr.epochAt(NOW + EPOCH_SECS)).toBe(EPOCH + 1);
+  });
 });
 
 describe('TokenManager settle ledger (matches the corrected core policy)', () => {
