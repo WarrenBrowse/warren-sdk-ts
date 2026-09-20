@@ -16,6 +16,7 @@
 import { sha256 } from '@noble/hashes/sha2';
 import { sha384 } from '@noble/hashes/sha512';
 import { WarrenEdgeError } from './errors.js';
+import type { TokenRandom } from './token-blinding.js';
 
 /** Privacy Pass blind-RSA token type (RFC 9578 section 8.2.1). */
 export const TOKEN_TYPE_BLIND_RSA = 0x0002;
@@ -345,18 +346,25 @@ export interface TokenClientState {
  *
  * `nonce`/`blind` are injectable for deterministic test vectors ONLY; production
  * draws both from the CSPRNG (unlinkability depends on a fresh random blind).
+ *
+ * `random` replaces that CSPRNG with a caller-supplied byte source. The one use
+ * is {@link deterministicTokenRandom}, which makes a batch re-derivable from
+ * the wallet after a store loss; the draws below are made in a fixed order
+ * (nonce, PSS salt, then the coprime search) because that order is part of what
+ * a recovering client has to reproduce.
  */
 export function blindToken(
   pk: IssuerPublicKey,
   challengeDigest: Uint8Array,
-  opts?: { nonce?: Uint8Array; blind?: bigint; salt?: Uint8Array },
+  opts?: { nonce?: Uint8Array; blind?: bigint; salt?: Uint8Array; random?: TokenRandom },
 ): { blindedRequest: Uint8Array; state: TokenClientState } {
-  const nonce = opts?.nonce ?? randomBytes(NONCE_LEN);
-  const salt = opts?.salt ?? randomBytes(HASH_LEN);
+  const draw = opts?.random ?? randomBytes;
+  const nonce = opts?.nonce ?? draw(NONCE_LEN);
+  const salt = opts?.salt ?? draw(HASH_LEN);
   const tokenInput = buildTokenInput(nonce, challengeDigest, pk.keyId);
   const em = emsaPssEncode(tokenInput, MOD_BITS - 1, salt);
   const m = os2ip(em);
-  const r = opts?.blind ?? randomCoprime(pk.n);
+  const r = opts?.blind ?? randomCoprime(pk.n, draw);
   const rInv = modInverse(r, pk.n);
   // blinded = m * r^e mod n
   const blinded = (m * modPow(r, pk.e, pk.n)) % pk.n;
@@ -429,9 +437,9 @@ function randomBytes(n: number): Uint8Array {
   return out;
 }
 
-function randomCoprime(n: bigint): bigint {
+function randomCoprime(n: bigint, draw: TokenRandom): bigint {
   for (;;) {
-    const r = os2ip(randomBytes(AUTHENTICATOR_LEN)) % n;
+    const r = os2ip(draw(AUTHENTICATOR_LEN)) % n;
     if (r > 1n) {
       try {
         modInverse(r, n);

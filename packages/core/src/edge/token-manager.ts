@@ -96,9 +96,17 @@ export class TokenManager {
    * {@link takeCurrentStack} maps `now` to an epoch before the first refresh. */
   private epochSecs: number | undefined;
 
+  /**
+   * `blindingKey` ({@link blindingKeyFromSeed}) makes this account's batch a
+   * function of the wallet rather than of the CSPRNG. Without it, a store lost
+   * mid-epoch costs the user the rest of the epoch: the issuer signed that
+   * epoch once and refuses any other batch for it. With it, the client rebuilds
+   * the batch it already owns and the issuer serves it again, minting nothing.
+   */
   constructor(
     private readonly transport: TokenTransport,
     private readonly persistence: TokenPersistence = new InMemoryTokenPersistence(),
+    private readonly blindingKey?: Uint8Array,
   ) {
     this.loadPersisted();
   }
@@ -134,7 +142,13 @@ export class TokenManager {
 
     for (const epoch of targets) {
       try {
-        const tokens = await mintEpoch(this.transport, directory, epoch, directory.quota_per_epoch);
+        const tokens = await mintEpoch(
+          this.transport,
+          directory,
+          epoch,
+          directory.quota_per_epoch,
+          this.blindingKey,
+        );
         this.settled.add(epoch);
         const serialized = tokens.map((t) => t.serialize());
         const existing = this.store.get(epoch);

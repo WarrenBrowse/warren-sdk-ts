@@ -1,4 +1,4 @@
-import { hexToBytes } from '@noble/hashes/utils';
+import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { base64urlnopad } from '@scure/base';
 import { describe, expect, it } from 'vitest';
 import {
@@ -9,6 +9,7 @@ import {
   TokenManager,
   type TokenPersistence,
   type TokenTransport,
+  blindingKeyFromSeed,
 } from '../src/index.js';
 
 // The FIXED test issuer key (warrenguard-token `IssuerSecretKey::generate(seed
@@ -63,6 +64,10 @@ function fakeTransport(cfg: {
   quota?: number;
   counts: Map<number, number>;
   behavior?: (epoch: number, call: number) => IssueAction;
+  /** When present, mimics the issuer's once-per-account-epoch ledger: the first
+   * batch takes the epoch, the same batch is served again, any other is
+   * refused. Keyed epoch -> the batch that took it. */
+  ledger?: Map<number, string>;
 }): TokenTransport {
   const quota = cfg.quota ?? 2;
   const n = os2ip(hexToBytes(N_HEX));
@@ -94,6 +99,16 @@ function fakeTransport(cfg: {
       if (action === 'throw') throw new Error('transient network failure');
       if (action !== 'sign') {
         return { epochs: [{ epoch: ep.epoch, issued: false, reject_reason: action }] };
+      }
+      if (cfg.ledger) {
+        const batch = ep.blinded.join('.');
+        const held = cfg.ledger.get(ep.epoch);
+        if (held === undefined) cfg.ledger.set(ep.epoch, batch);
+        else if (held !== batch) {
+          return {
+            epochs: [{ epoch: ep.epoch, issued: false, reject_reason: 'already_issued' }],
+          };
+        }
       }
       const blind_signatures = ep.blinded.map((b64) =>
         base64urlnopad.encode(i2osp(modPow(os2ip(base64urlnopad.decode(b64)), d, n), 256)),
@@ -262,5 +277,47 @@ describe('TokenManager persistence', () => {
     const mgr = new TokenManager(offlineTransport, persistence);
     expect(mgr.epochs()).toEqual([]);
     expect(mgr.takeCurrentStack(NOW)).toEqual([]);
+  });
+});
+
+describe('recovering a lost store inside the epoch', () => {
+  const KEY = blindingKeyFromSeed(new Uint8Array(32).fill(3), 'browser-proxy');
+
+  it('leaves the epoch lost when the batch came from the CSPRNG', async () => {
+    // The issuer signed this account's epoch once and refuses any other batch
+    // for it, so a wiped store cannot be rebuilt: this is the defect the
+    // wallet-derived batch exists to remove.
+    const cfg = { epochs: [EPOCH], counts: new Map<number, number>(), ledger: new Map() };
+    await new TokenManager(fakeTransport(cfg), new InMemoryTokenPersistence()).refresh(NOW);
+
+    const reinstalled = new TokenManager(fakeTransport(cfg), new InMemoryTokenPersistence());
+    await reinstalled.refresh(NOW);
+    expect(reinstalled.available(EPOCH)).toBe(0);
+  });
+
+  it('re-derives the very same credentials from the wallet, so a reinstall costs nothing', async () => {
+    const cfg = { epochs: [EPOCH], counts: new Map<number, number>(), ledger: new Map() };
+    const first = new TokenManager(fakeTransport(cfg), new InMemoryTokenPersistence(), KEY);
+    await first.refresh(NOW);
+    expect(first.available(EPOCH)).toBe(2);
+
+    // A fresh install: same wallet, empty store, same hour.
+    const reinstalled = new TokenManager(fakeTransport(cfg), new InMemoryTokenPersistence(), KEY);
+    await reinstalled.refresh(NOW);
+    expect(reinstalled.available(EPOCH)).toBe(2);
+    expect(bytesToHex(reinstalled.takeCurrentStack(NOW)[0]!)).toBe(
+      bytesToHex(first.takeCurrentStack(NOW)[0]!),
+      'the recovered credential must be the one that already exists, not a new one',
+    );
+  });
+
+  it('is refused when another wallet holds the epoch, so the cap is not a door', async () => {
+    const cfg = { epochs: [EPOCH], counts: new Map<number, number>(), ledger: new Map() };
+    await new TokenManager(fakeTransport(cfg), new InMemoryTokenPersistence(), KEY).refresh(NOW);
+
+    const other = blindingKeyFromSeed(new Uint8Array(32).fill(4), 'browser-proxy');
+    const intruder = new TokenManager(fakeTransport(cfg), new InMemoryTokenPersistence(), other);
+    await intruder.refresh(NOW);
+    expect(intruder.available(EPOCH)).toBe(0);
   });
 });

@@ -16,6 +16,7 @@
 import { bytesToHex } from '@noble/hashes/utils';
 import { base64urlnopad } from '@scure/base';
 import { WarrenEdgeError } from './errors.js';
+import { deterministicTokenRandom } from './token-blinding.js';
 import {
   type IssuerPublicKey,
   type Token,
@@ -118,6 +119,10 @@ export function currentEpoch(directory: TokenIssuerDirectory, nowUnixSecs: numbe
  * manager fetch the directory once and mint several prefetch epochs from it,
  * matching the Rust `mint_tokens` shape.
  *
+ * With a `blindingKey` the batch is derived from the wallet rather than the
+ * CSPRNG ({@link deterministicTokenRandom}), so a client that lost its store
+ * re-asks for the credentials it already owns instead of waiting the epoch out.
+ *
  * @throws {WarrenEdgeError} `epoch_rejected` (carrying the issuer's
  * `rejectReason`) if the issuer refused the epoch; `token_issuer` if the
  * issuer's response is otherwise inconsistent.
@@ -127,6 +132,7 @@ export async function mintEpoch(
   directory: TokenIssuerDirectory,
   epoch: number,
   count: number,
+  blindingKey?: Uint8Array,
 ): Promise<Token[]> {
   const pk = issuerKeyForEpoch(directory, epoch);
   const wanted = Math.min(count, directory.quota_per_epoch);
@@ -139,7 +145,12 @@ export async function mintEpoch(
   const blindedB64: string[] = [];
   const states: TokenClientState[] = [];
   for (let i = 0; i < wanted; i++) {
-    const { blindedRequest, state } = blindToken(pk, challengeDigest);
+    const { blindedRequest, state } =
+      blindingKey === undefined
+        ? blindToken(pk, challengeDigest)
+        : blindToken(pk, challengeDigest, {
+            random: deterministicTokenRandom(blindingKey, epoch, i),
+          });
     blindedB64.push(base64urlnopad.encode(blindedRequest));
     states.push(state);
   }

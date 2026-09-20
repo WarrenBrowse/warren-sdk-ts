@@ -80,6 +80,12 @@ export {
   type TokenTransport,
 } from './token-acquire.js';
 export {
+  BLINDING_PURPOSE_BROWSER_PROXY,
+  blindingKeyFromSeed,
+  deterministicTokenRandom,
+  type TokenRandom,
+} from './token-blinding.js';
+export {
   InMemoryTokenPersistence,
   TokenManager,
   type TokenPersistence,
