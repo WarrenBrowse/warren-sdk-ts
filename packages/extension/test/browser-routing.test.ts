@@ -215,8 +215,18 @@ describe('firefoxProxyInfoFor', () => {
   it('offers masque first and the https ingress as failover', () => {
     const infos = firefoxProxyInfoFor(MASQUE, CREDENTIAL);
     expect(infos.map((i) => i.type)).toEqual(['masque', 'https']);
-    expect(infos[0]).toMatchObject({ masqueTemplate: MASQUE.masqueTemplate, failoverTimeout: 5 });
+    expect(infos[0]).toMatchObject({ failoverTimeout: 5 });
     expect(infos[1]).toMatchObject({ host: MASQUE.host, port: 443 });
+  });
+
+  it('puts the credential in the masque template query too, for the CONNECT-UDP connection', () => {
+    // Firefox sends no header on CONNECT-UDP and opens a dedicated connection
+    // for it, so the template is the only place a credential can reach it.
+    const [masque] = firefoxProxyInfoFor(MASQUE, CREDENTIAL);
+    expect(masque?.masqueTemplate).toBe(`${MASQUE.masqueTemplate}?credential=${CREDENTIAL}`);
+    expect(masque).toHaveProperty('proxyAuthorizationHeader');
+    const [bare] = firefoxProxyInfoFor(MASQUE, undefined);
+    expect(bare?.masqueTemplate).toBe(MASQUE.masqueTemplate);
   });
 
   it('omits the header when there is no credential, so the ingress challenges', () => {

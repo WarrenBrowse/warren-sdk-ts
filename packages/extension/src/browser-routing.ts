@@ -338,6 +338,13 @@ export function attachChromiumProxyAuth(
  * the CONNECT tier. The credential rides on `proxyAuthorizationHeader`, since
  * Firefox forbids `username`/`password` on both `https` and `masque` proxies.
  * With no credential the header is omitted and the ingress challenges.
+ *
+ * Firefox sends that header on its CONNECT streams only, never on CONNECT-UDP,
+ * and it opens a dedicated HTTP/3 connection for CONNECT-UDP (measured against
+ * the exit on 2026-09-21), so a header could never admit that connection. The
+ * credential therefore also rides in the template's query, which Firefox
+ * expands verbatim (RFC 6570) and the ingress reads (`credential=`), inside the
+ * same TLS as the header would have been.
  */
 export function firefoxProxyInfoFor(
   endpoint: IngressEndpoint,
@@ -351,12 +358,16 @@ export function firefoxProxyInfoFor(
     ...auth,
   };
   if (endpoint.kind === 'masque') {
+    const masqueTemplate =
+      credential === undefined
+        ? endpoint.masqueTemplate
+        : `${endpoint.masqueTemplate}?credential=${credential}`;
     return [
       {
         type: 'masque',
         host: endpoint.host,
         port: endpoint.port,
-        masqueTemplate: endpoint.masqueTemplate,
+        masqueTemplate,
         failoverTimeout: 5,
         ...auth,
       },
