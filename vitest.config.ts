@@ -8,8 +8,10 @@ export default defineConfig({
     // there and intermittently blow vitest's 5s default under host load, redding
     // the whole js (windows) matrix leg. A generous timeout on that leg removes
     // the flake without weakening any assertion (a genuine hang still fails).
-    testTimeout: process.platform === 'win32' ? 30000 : 10000,
-    hookTimeout: process.platform === 'win32' ? 30000 : 10000,
+    // The vault's export/import test derives twice and took 35 s there on
+    // 2026-09-21, past the previous 30 s.
+    testTimeout: process.platform === 'win32' ? 120000 : 10000,
+    hookTimeout: process.platform === 'win32' ? 120000 : 10000,
     coverage: {
       provider: 'v8',
       include: ['packages/*/src/**/*.ts'],
