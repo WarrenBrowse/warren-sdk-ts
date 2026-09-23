@@ -57,10 +57,13 @@ jobs:
         # Clear pnpm/action-setup's own install dir too: on a reused self-hosted
         # Windows runner its cleanup hits ENOTEMPTY on a locked leftover
         # node_modules, leaving the pnpm shim missing ("batch file cannot be
-        # found"). Removing it up front lets the setup reinstall cleanly.
+        # found"). Removing it up front lets the setup reinstall cleanly. The
+        # dir is the runner's own (below), never the home directory the runner
+        # services of one machine share: clearing that one deleted pnpm under
+        # a concurrent job ("pnpm: command not found").
         run: |
           rm -rf .git vectors 2>/dev/null || true
-          rm -rf "$HOME/setup-pnpm" "${USERPROFILE:-/nonexistent}/setup-pnpm" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/setup-pnpm" 2>/dev/null || true
       - uses: actions/checkout@v4
       - name: Fetch the golden-vectors submodule
         shell: bash
@@ -75,6 +78,8 @@ jobs:
           export GIT_CONFIG_VALUE_0="https://github.com/"
           git submodule update --init --recursive
       - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -115,7 +120,7 @@ jobs:
         shell: bash
         run: |
           rm -rf .git vectors 2>/dev/null || true
-          rm -rf "$HOME/setup-pnpm" "${USERPROFILE:-/nonexistent}/setup-pnpm" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/setup-pnpm" 2>/dev/null || true
       - uses: actions/checkout@v4
       - name: Fetch the golden-vectors submodule
         shell: bash
@@ -130,6 +135,8 @@ jobs:
           export GIT_CONFIG_VALUE_0="https://github.com/"
           git submodule update --init --recursive
       - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm
       - uses: actions/setup-node@v4
         with:
           node-version: 20

@@ -52,10 +52,12 @@ jobs:
         # Clear pnpm/action-setup's install dir too: on a reused self-hosted
         # Windows runner its cleanup hits ENOTEMPTY on a locked leftover
         # node_modules and the whole leg dies before the build. Removing it up
-        # front lets the setup reinstall cleanly.
+        # front lets the setup reinstall cleanly. The dir is the runner's own
+        # (below), never the home directory the runner services of one machine
+        # share: clearing that one deleted pnpm under a concurrent job.
         run: |
           rm -rf .git sdk-ts engine warren-sdk-rs warrenguard warren-contract 2>/dev/null || true
-          rm -rf "$HOME/setup-pnpm" "${USERPROFILE:-/nonexistent}/setup-pnpm" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/setup-pnpm" 2>/dev/null || true
       - uses: actions/checkout@v4
         with:
           path: sdk-ts
@@ -106,6 +108,7 @@ jobs:
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: sdk-ts/package.json
+          dest: ${{ runner.temp }}/setup-pnpm
       - uses: actions/setup-node@v4
         with:
           node-version: 20
