@@ -3,6 +3,7 @@ import {
   FAIL_CLOSED_PROXY,
   type IngressEndpoint,
   type LockdownState,
+  type MultihopRoutingState,
   type RoutingState,
   type RoutingStore,
   attachChromiumProxyAuth,
@@ -38,6 +39,12 @@ const LOCKDOWN: LockdownState = {
   tier: 'lockdown',
   exempt: ['api.example.com'],
   installedAt: 2000,
+};
+const MULTIHOP: MultihopRoutingState = {
+  tier: 'multihop',
+  socks5: '127.0.0.1:1080',
+  split: { mode: 'only', rules: ['work.example'] },
+  installedAt: 3000,
 };
 const CREDENTIAL = 'a-base64url-credential';
 const provider = { current: async () => CREDENTIAL };
@@ -426,6 +433,19 @@ describe('attachFirefoxRouting under a lockdown', () => {
     expect(await route('https://api.example.com.evil.net/')).toEqual(FAIL_CLOSED_PROXY);
   });
 
+  it('answers a multi-hop record with its SOCKS endpoint, so a restart finds the tunnel, dead or alive', async () => {
+    const store = memoryRoutingStore();
+    await store.save(MULTIHOP);
+    const route = listen(store);
+    expect(await route('https://app.work.example/')).toEqual({
+      type: 'socks',
+      host: '127.0.0.1',
+      port: 1080,
+      proxyDNS: true,
+    });
+    expect(await route('https://personal.example/')).toEqual({ type: 'direct' });
+  });
+
   it('stalls a request whose URL it cannot parse while routed', async () => {
     const store = memoryRoutingStore();
     await store.save(STATE);
@@ -465,6 +485,8 @@ describe('routingStoreOver', () => {
     });
     await store.save(LOCKDOWN);
     expect(await store.load()).toEqual(LOCKDOWN);
+    await store.save(MULTIHOP);
+    expect(await store.load()).toEqual(MULTIHOP);
     items.set('warren.routing', { tier: 'lockdown', exempt: 'api.example.com', installedAt: 1 });
     expect(await store.load()).toBeUndefined();
   });

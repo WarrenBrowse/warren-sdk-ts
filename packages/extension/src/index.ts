@@ -73,6 +73,7 @@ export {
   type FirefoxProxyLike,
   type IngressEndpoint,
   type LockdownState,
+  type MultihopRoutingState,
   type ProxySettingsLike,
   type RoutingRecord,
   type RoutingState,

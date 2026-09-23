@@ -112,9 +112,25 @@ export interface LockdownState {
   readonly installedAt: number;
 }
 
+/**
+ * The multi-hop tier's routing: the local SOCKS endpoint of the native host's
+ * tunnel and the split it applies. Firefox forgets an in-memory `onRequest`
+ * handler with the worker, so the persistent listener answers from this record
+ * too, and a restart finds the browser pointed at the (now dead) tunnel rather
+ * than direct.
+ */
+export interface MultihopRoutingState {
+  readonly tier: 'multihop';
+  /** `host:port` of the native host's SOCKS5 proxy. */
+  readonly socks5: string;
+  readonly split: SplitTunnelConfig;
+  /** Unix ms the routing was installed, for diagnostics. */
+  readonly installedAt: number;
+}
+
 /** Whatever the browser is told to do, persisted across worker teardowns,
  * browser restarts and extension updates. */
-export type RoutingRecord = RoutingState | LockdownState;
+export type RoutingRecord = RoutingState | LockdownState | MultihopRoutingState;
 
 /** Yields the credential to present right now, or `undefined` when the store
  * holds none for this epoch. Async because minting and epoch bookkeeping are. */
@@ -286,7 +302,7 @@ function isLockdownValue(value: unknown): boolean {
   );
 }
 
-function chromiumValueOf(record: RoutingRecord): unknown {
+function chromiumValueOf(record: RoutingState | LockdownState): unknown {
   return record.tier === 'lockdown'
     ? buildChromiumLockdownValue(record.exempt)
     : buildChromiumIngressValue(record.endpoint, record.split);
@@ -319,7 +335,7 @@ function ingressHostFromValue(value: unknown): string | undefined {
  */
 export async function installChromiumRouting(
   settings: ProxySettingsLike,
-  record: RoutingRecord,
+  record: RoutingState | LockdownState,
 ): Promise<void> {
   const before = await settings.get({});
   if (!controllable(before.levelOfControl)) {
@@ -488,6 +504,7 @@ export function attachFirefoxRouting(
           : FAIL_CLOSED_PROXY;
       }
       if (!shouldTunnelHost(host, state.split)) return { type: 'direct' };
+      if (state.tier === 'multihop') return socksProxyInfo(state.socks5);
       const credential = await credentials.current();
       return firefoxProxyInfoFor(state.endpoint, credential);
     },
@@ -495,11 +512,29 @@ export function attachFirefoxRouting(
   );
 }
 
+/** The Firefox ProxyInfo for the native host's SOCKS5 endpoint, names resolved
+ * at the exit. */
+function socksProxyInfo(socks5: string): {
+  type: 'socks';
+  host: string;
+  port: number;
+  proxyDNS: true;
+} {
+  const sep = socks5.lastIndexOf(':');
+  return {
+    type: 'socks',
+    host: socks5.slice(0, sep),
+    port: Number(socks5.slice(sep + 1)),
+    proxyDNS: true,
+  };
+}
+
 /** Validates a stored value as a {@link RoutingRecord}; a corrupt store yields
  * `undefined` so the extension never routes on garbage. */
 function asRoutingRecord(value: unknown): RoutingRecord | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
   if ((value as { tier?: unknown }).tier === 'lockdown') return asLockdownState(value);
+  if ((value as { tier?: unknown }).tier === 'multihop') return asMultihopState(value);
   const v = value as Partial<RoutingState>;
   const e = v.endpoint as IngressEndpoint | undefined;
   if (v.tier !== 'ingress' || !e || (e.kind !== 'https' && e.kind !== 'masque')) return undefined;
@@ -511,6 +546,23 @@ function asRoutingRecord(value: unknown): RoutingRecord | undefined {
     return undefined;
   if (v.hops !== 1 && v.hops !== 2) return undefined;
   return v as RoutingState;
+}
+
+function isSplit(value: unknown): value is SplitTunnelConfig {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as Partial<SplitTunnelConfig>;
+  return (
+    (v.mode === 'all' || v.mode === 'bypass' || v.mode === 'only') &&
+    Array.isArray(v.rules) &&
+    v.rules.every((r) => typeof r === 'string')
+  );
+}
+
+function asMultihopState(value: object): MultihopRoutingState | undefined {
+  const v = value as Partial<MultihopRoutingState>;
+  if (typeof v.socks5 !== 'string' || !/^[^:]+:\d+$/.test(v.socks5)) return undefined;
+  if (!isSplit(v.split) || typeof v.installedAt !== 'number') return undefined;
+  return v as MultihopRoutingState;
 }
 
 function asLockdownState(value: object): LockdownState | undefined {
