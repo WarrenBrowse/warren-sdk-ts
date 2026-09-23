@@ -404,7 +404,7 @@ function controllable(level: string): boolean {
   return level === 'controllable_by_this_extension' || level === 'controlled_by_this_extension';
 }
 
-/** How many answered loopback challenges are remembered to spot a refusal. */
+/** How many answered challenges are remembered to spot a refusal. */
 const ANSWERED_MEMORY = 512;
 
 /**
@@ -424,37 +424,43 @@ export function attachChromiumProxyAuth(
   webRequest: WebRequestLike,
   sources: ProxyAuthSources,
 ): void {
-  // A second challenge for a request already answered means the listener
-  // refused the credentials: answering again would loop, so it stalls.
+  // A second challenge for a request already answered means the proxy refused
+  // the credentials: answering again would loop, so it stalls.
   const answered = new Set<string>();
-  async function answer(details: AuthChallenge): Promise<unknown> {
-    const challenger = details.challenger;
-    if (!challenger) return { cancel: true };
+  async function credentialFor(challenger: {
+    host: string;
+    port: number;
+  }): Promise<ExtensionProxyAuth | undefined> {
     if (isLoopbackHost(challenger.host)) {
-      const auth = sources.local?.forListener(`${challenger.host}:${challenger.port}`);
-      if (!auth || details.requestId === undefined || answered.has(details.requestId)) {
-        return { cancel: true };
-      }
-      answered.add(details.requestId);
-      if (answered.size > ANSWERED_MEMORY) {
-        answered.delete(answered.values().next().value as string);
-      }
-      return { authCredentials: auth };
+      return sources.local?.forListener(`${challenger.host}:${challenger.port}`);
     }
     const ingress = sources.ingress;
-    if (!ingress) return { cancel: true };
+    if (!ingress) return undefined;
     const record = await ingress.routing.load();
     if (
       record?.tier !== 'ingress' ||
       record.endpoint.host.toLowerCase() !== challenger.host.toLowerCase() ||
       record.endpoint.port !== challenger.port
     ) {
-      return { cancel: true };
+      return undefined;
     }
     const credential = await ingress.credentials.current();
     return credential === undefined
-      ? { cancel: true }
-      : { authCredentials: { username: CREDENTIAL_USERNAME, password: credential } };
+      ? undefined
+      : { username: CREDENTIAL_USERNAME, password: credential };
+  }
+  async function answer(details: AuthChallenge): Promise<unknown> {
+    const { challenger, requestId } = details;
+    if (!challenger || requestId === undefined || answered.has(requestId)) {
+      return { cancel: true };
+    }
+    const auth = await credentialFor(challenger);
+    if (!auth) return { cancel: true };
+    answered.add(requestId);
+    if (answered.size > ANSWERED_MEMORY) {
+      answered.delete(answered.values().next().value as string);
+    }
+    return { authCredentials: auth };
   }
   webRequest.onAuthRequired.addListener(
     (details, callback) => {

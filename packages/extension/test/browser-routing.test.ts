@@ -368,6 +368,18 @@ describe('attachChromiumProxyAuth', () => {
     expect(await answer(rec, refused)).toEqual({ cancel: true });
   });
 
+  it('stalls a request whose ingress credential the ingress refused once', async () => {
+    const { webRequest, rec } = fakeWebRequest();
+    attachChromiumProxyAuth(webRequest, {
+      ingress: { credentials: provider, routing: await routedAt(STATE) },
+    });
+    const refused = challenge(INGRESS);
+    expect(await answer(rec, refused)).toEqual({
+      authCredentials: { username: 'warren', password: CREDENTIAL },
+    });
+    expect(await answer(rec, refused)).toEqual({ cancel: true });
+  });
+
   it('cancels the request rather than prompting when no credential exists', async () => {
     const { webRequest, rec } = fakeWebRequest();
     attachChromiumProxyAuth(webRequest, {
