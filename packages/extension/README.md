@@ -11,9 +11,9 @@ cannot proxy the whole browser. For the whole-browser VPN this package is built
 around, the split is: the **extension is the wallet** (the Warren account lives
 here, encrypted, exactly as MetaMask/Phantom keep a key), and a **local native
 messaging host** runs only the datapath, terminating the real multi-hop tunnel
-with `@warrenbrowse/sdk-node` and opening a local SOCKS5 proxy. The extension
-routes the **whole browser** through it with `chrome.proxy` and closes the
-WebRTC leak. Scope is the browser only; for all-OS traffic use the system-VPN
+with `@warrenbrowse/sdk-node` and opening local SOCKS5 and HTTP proxy listeners.
+The extension routes the **whole browser** through them with `chrome.proxy` and
+closes the WebRTC leak. Scope is the browser only; for all-OS traffic use the system-VPN
 mode of `@warrenbrowse/sdk-node`.
 
 ## The wallet ({@link WarrenKeyring})
@@ -34,6 +34,20 @@ launch. Auto-lock and explicit lock wipe both.
   over the network. At connect time it is handed once to the **local** native
   host over native messaging (a user-installed datapath, like a local signer),
   used, and not persisted there; the host is otherwise identity-less.
+- **The listeners demand credentials.** Every account and process on the
+  machine can reach a loopback port, so the host's listeners refuse any client
+  without the credentials it mints for each tunnel, and hands them over once,
+  in the connect answer (protocol 2; a version 1 peer is refused at `hello`).
+  `WarrenBrowserVpn` keeps them in memory for as long as that host lives and
+  gives them out through `forListener(address)` only for its own listeners.
+  Chromium cannot authenticate to a SOCKS5 proxy, so it is pointed at the HTTP
+  listener, and `attachChromiumProxyAuth(chrome.webRequest, { local: vpn })`
+  answers the listener's `407`; a browser-proxy tier passes its ingress source
+  too, and the challenger's host and port decide which credential answers, so
+  neither ever reaches the other's proxy. Firefox is routed per request by a
+  `proxy.onRequest` handler whose SOCKS5 answers carry them. On Chromium this
+  needs the `webRequest` and `webRequestAuthProvider` permissions and a host
+  permission for every URL.
 - **Proxy control is verified, not assumed.** In Chromium the most recently
   installed extension wins the proxy setting and a losing `set()` is a silent
   no-op. `connect()` checks `levelOfControl` before dialing the tunnel and
@@ -44,7 +58,7 @@ launch. Auto-lock and explicit lock wipe both.
   even under SOCKS5, so `networkPredictionEnabled` is switched off together
   with `webRTCIPHandlingPolicy = disable_non_proxied_udp`, both before the
   proxy is applied and both restored on explicit disconnect. DNS stays on the
-  tunnel: Chromium hands hostnames to the SOCKS5 proxy, which resolves at the exit.
+  tunnel: both browsers hand hostnames to the proxy, which resolves at the exit.
 - **Fail-closed.** Once connected, the proxy settings are only removed by an
   explicit `disconnect()`. If the host dies, the browser keeps pointing at the
   dead proxy: traffic blackholes instead of leaking around the tunnel. The host
@@ -76,7 +90,12 @@ launch. Auto-lock and explicit lock wipe both.
 ## Extension side (bundle into your MV3 service worker)
 
 ```ts
-import { WarrenBrowserVpn, WarrenKeyring, chromeStorageArea } from '@warrenbrowse/sdk-extension';
+import {
+  WarrenBrowserVpn,
+  WarrenKeyring,
+  attachChromiumProxyAuth,
+  chromeStorageArea,
+} from '@warrenbrowse/sdk-extension';
 
 const keyring = new WarrenKeyring({
   local: chromeStorageArea(chrome.storage.local),
@@ -86,8 +105,11 @@ const keyring = new WarrenKeyring({
 // on each wake: await keyring.rehydrate(); popup unlock: await keyring.unlock(password)
 
 const vpn = new WarrenBrowserVpn({ onState: (s) => console.log('vpn', s) });
+// Chromium: answers the host listener's 407 with the session credentials.
+// Register it at the top level of the service worker, on every start.
+attachChromiumProxyAuth(chrome.webRequest, { local: vpn });
 const mnemonic = await keyring.getMnemonic(); // from the unlocked vault
-const { socks5 } = await vpn.connect({ mnemonic, selector: { country: 'NL' } });
+await vpn.connect({ mnemonic, selector: { country: 'NL' } });
 // the whole browser now egresses at the Warren exit
 await vpn.disconnect();
 ```
@@ -230,8 +252,11 @@ directory or the browser was not fully restarted).
 
 Supported by the same `WarrenBrowserVpn` class: the proxy-settings dialect is
 auto-detected (or forced with `platform: 'firefox'`). Differences handled for
-you: `browser.proxy.settings` manual-socks shape with an explicit
-`proxyDNS: true` (default only since Firefox 128), a typed
+you: a `proxy.onRequest` handler whose SOCKS5 answers carry the listener's
+credentials (Firefox accepts `username` and `password` on a `socks` ProxyInfo
+only), a `browser.proxy.settings` manual-socks shape with an explicit
+`proxyDNS: true` (default only since Firefox 128) holding the browser on the
+listener should that handler be gone, a typed
 `private_browsing_required` error when the user has not granted
 private-browsing access (Firefox refuses proxy control without it; guide the
 user to enable it in the add-on's settings), and a `false` set() result mapped
@@ -254,7 +279,12 @@ bypassed), a real tab egressed at the NL exit `50.7.46.90` (not the machine's IP
 and `disconnect()` released the proxy. The reusable harness is
 [`validate-browser-egress.mjs`](./validate-browser-egress.mjs) (drives a real
 browser over CDP); [`validate-host-egress.mjs`](./validate-host-egress.mjs) covers
-the native-host protocol + multi-hop datapath on their own. Stable Google Chrome
+the native-host protocol + multi-hop datapath on their own. Revalidated on
+2026-09-23 once the listeners demanded credentials, with the product extension
+and a real host at a beta exit: Chrome for Testing through the HTTP listener
+(`http://` and `https://` both egressed at the exit, the `407` answered by
+`attachChromiumProxyAuth`), Firefox 155 through the SOCKS5 listener with the
+credentials on its `proxy.onRequest` answers. Stable Google Chrome
 137+ ignores `--load-extension`, so the browser harness targets a Chromium that
 still honours it (Brave or Chrome for Testing); the shipped extension itself works
 unchanged on stock Chrome once installed normally.

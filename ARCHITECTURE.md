@@ -84,8 +84,9 @@ An extension does not remove the barriers (no raw sockets, WebTransport still
 X.509, no OS capture), so the datapath still cannot run in the browser. But
 `chrome.proxy` can route the **whole browser** through a `host:port` proxy and
 `nativeMessaging` bridges to a local native binary. So a genuine browser-scope,
-non-root VPN reuses our packages: a `@warrenbrowse/sdk-node` native host opens a
-local SOCKS5 (no root), and an extension points `chrome.proxy` at it and drives
+non-root VPN reuses our packages: a `@warrenbrowse/sdk-node` native host opens
+local SOCKS5 and HTTP listeners (no root) that demand per-session credentials,
+and an extension points `chrome.proxy` at them, answers their challenge, and drives
 connect/disconnect over native messaging. Caveats: a native host must still be
 installed; scope is the browser only; the extension must close the WebRTC leak
 (`webRTCIPHandlingPolicy = disable_non_proxied_udp`) and keep DNS on the tunnel.
