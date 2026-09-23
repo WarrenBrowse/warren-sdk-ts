@@ -301,7 +301,7 @@ describe('WarrenApiClient', () => {
     expect(err.code).toBe('no_identity');
   });
 
-  it('pullPendingVoucher returns null on 404 and the secret on 200', async () => {
+  it('pullPendingVoucher presents the pull secret in the body, null on 404, the secret on 200', async () => {
     const pending = recordingTransport(() => ({ status: 404, body: '' }));
     const ready = recordingTransport(() => ok('{"voucher_secret":"v-123"}'));
 
@@ -314,9 +314,12 @@ describe('WarrenApiClient', () => {
       transport: ready.transport,
     });
 
-    expect(await c1.pullPendingVoucher('pend-1')).toBeNull();
-    expect(await c2.pullPendingVoucher('pend-1')).toBe('v-123');
+    const secret = '11'.repeat(32);
+    expect(await c1.pullPendingVoucher('pend-1', secret)).toBeNull();
+    expect(await c2.pullPendingVoucher('pend-1', secret)).toBe('v-123');
+    expect(ready.requests[0]!.method).toBe('POST');
     expect(ready.requests[0]!.url).toBe('https://api.example.com/v1/checkout/pend-1/voucher');
+    expect(JSON.parse(String(ready.requests[0]!.body))).toEqual({ pull_secret: secret });
   });
 });
 

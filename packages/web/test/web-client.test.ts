@@ -50,9 +50,10 @@ describe('WarrenWebClient', () => {
       transport: ready.transport,
     });
 
-    expect(await c1.pullPendingVoucher('p')).toBeNull();
+    expect(await c1.pullPendingVoucher('p', 'ab'.repeat(32))).toBeNull();
     expect(await c1.multihopDirectory()).toBeNull();
-    expect(await c2.pullPendingVoucher('p')).toBe('v-9');
+    expect(await c2.pullPendingVoucher('p', 'ab'.repeat(32))).toBe('v-9');
+    expect(ready.requests[0]!.method).toBe('POST');
     expect(ready.requests[0]!.url).toBe('https://api.example.com/v1/checkout/p/voucher');
     expect(ready.requests[0]!.headers['X-Warren-Sig']).toBeUndefined();
   });

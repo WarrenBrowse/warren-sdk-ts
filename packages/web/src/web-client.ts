@@ -44,9 +44,12 @@ export class WarrenWebClient {
     return this.api.register(req);
   }
 
-  /** `GET /v1/checkout/{id}/voucher` (unsigned). Polls a pending checkout; `null` until ready. */
-  pullPendingVoucher(pendingId: string): Promise<string | null> {
-    return this.api.pullPendingVoucher(pendingId);
+  /**
+   * `POST /v1/checkout/{wpid}/voucher` (unsigned). Polls a checkout purchase with its pull
+   * secret; `null` until ready.
+   */
+  pullPendingVoucher(wpid: string, pullSecret: string): Promise<string | null> {
+    return this.api.pullPendingVoucher(wpid, pullSecret);
   }
 
   /** `GET /v1/multihop/directory` (unsigned). The signed directory JSON, or `null`. */

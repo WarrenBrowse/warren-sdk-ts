@@ -129,9 +129,16 @@ export class WarrenApiClient {
     );
   }
 
-  /** `GET /v1/checkout/{id}/voucher` (unsigned). Polls a pending checkout; `null` until ready. */
-  async pullPendingVoucher(pendingId: string): Promise<string | null> {
-    const res = await this.request('GET', `/v1/checkout/${encodeURIComponent(pendingId)}/voucher`, {
+  /**
+   * `POST /v1/checkout/{wpid}/voucher` (unsigned). Polls a checkout purchase, presenting
+   * `pullSecret`, the 64-hex secret the purchase was bound to at creation (the caller mints it
+   * with the wpid and gives the checkout only its SHA-256). The secret travels in the body,
+   * never the URL. `null` until ready, and also for a wrong secret: the server does not tell
+   * them apart.
+   */
+  async pullPendingVoucher(wpid: string, pullSecret: string): Promise<string | null> {
+    const res = await this.request('POST', `/v1/checkout/${encodeURIComponent(wpid)}/voucher`, {
+      body: JSON.stringify({ pull_secret: pullSecret }),
       signed: false,
     });
     if (res.status === 404) return null;
