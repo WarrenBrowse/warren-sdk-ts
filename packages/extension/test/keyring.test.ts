@@ -35,9 +35,10 @@ describe('WarrenKeyring', () => {
     expect(mnemonic.split(' ')).toHaveLength(12);
     expect(kr.isUnlocked()).toBe(true);
     expect((await kr.getAddress()).startsWith('wb')).toBe(true);
-    // The vault is persisted encrypted: the mnemonic must not appear in cleartext.
+    // The vault is persisted encrypted: the phrase must not appear in cleartext.
+    // A single word proves nothing, since one can be a key of the vault JSON.
     expect(local.get('warren.vault')).toBeDefined();
-    expect(local.get('warren.vault')).not.toContain(mnemonic.split(' ')[0]);
+    expect(local.get('warren.vault')).not.toContain(mnemonic.split(' ').slice(0, 3).join(' '));
   });
 
   it('imports an existing mnemonic', async () => {
