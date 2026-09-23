@@ -34,6 +34,9 @@ on:
 jobs:
   js:
     name: js (${{ matrix.name }})
+    # Self-hosted runners must never execute fork code: only same-repo events
+    # reach this job.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -100,6 +103,9 @@ jobs:
 
   coverage:
     name: coverage
+    # Self-hosted runners must never execute fork code: only same-repo events
+    # reach this job.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, Linux, X64]
     steps:
       # Self-hosted runners reuse the workspace; force a clean clone so a stray
