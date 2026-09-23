@@ -6,6 +6,7 @@ import {
   type ExtensionEntryQuery,
   type ExtensionExitLocation,
   type ExtensionExitQuery,
+  type ExtensionProxyAuth,
   type ExtensionVpnState,
   type HostRequest,
   type HostResponse,
@@ -13,6 +14,7 @@ import {
 } from './protocol.js';
 import {
   DEFAULT_SPLIT,
+  FAIL_CLOSED_PROXY,
   type SplitTunnelConfig,
   buildChromiumProxyValue,
   buildFirefoxProxyValue,
@@ -160,10 +162,27 @@ function globalChrome(): ChromeLike {
   return c;
 }
 
+/** Whether a host answer carries the credentials its listeners demand. */
+function listenerAuth(auth: unknown): ExtensionProxyAuth | undefined {
+  if (typeof auth !== 'object' || auth === null) return undefined;
+  const { username, password } = auth as Partial<ExtensionProxyAuth>;
+  if (typeof username !== 'string' || username.length === 0) return undefined;
+  if (typeof password !== 'string' || password.length === 0) return undefined;
+  return { username, password };
+}
+
 /**
  * Browser-scope, non-root VPN control: drives the local Warren native host
  * over native messaging and routes the whole browser through the host's local
- * SOCKS5 proxy via `chrome.proxy`.
+ * proxy via `chrome.proxy`: its HTTP listener on Chromium, which cannot
+ * authenticate to a SOCKS5 proxy, and its SOCKS5 listener on Firefox, whose
+ * `proxy.onRequest` answers carry the credentials.
+ *
+ * Both listeners demand the credentials the host minted for this tunnel. They
+ * live in this object's memory for as long as that host lives, and
+ * {@link forListener} hands them only to a challenge from one of its
+ * listeners: the Chromium background answers the listener's `407` with them
+ * (see `attachChromiumProxyAuth`).
  *
  * Fail-closed policy: once connected, the proxy settings are only ever removed
  * by an explicit {@link disconnect}. If the host dies, the browser keeps
@@ -187,6 +206,8 @@ export class WarrenBrowserVpn {
    * pointed at the corpse (fail-closed). */
   private tunnelUp = false;
   private endpoints: ExtensionEndpoints | undefined;
+  /** The credentials of the live host's listeners; dropped with the host. */
+  private auth: ExtensionProxyAuth | undefined;
   private connecting = false;
   private nextId = 1;
   private onRequestHandler: ((request: { url: string }) => unknown) | undefined;
@@ -225,6 +246,19 @@ export class WarrenBrowserVpn {
   }
 
   /**
+   * The credentials of the live tunnel's listener at `listener` (`host:port`),
+   * or `undefined` when no live host owns that address: a listener of a dead
+   * host, or a process that took its port over, gets nothing.
+   */
+  forListener(listener: string): ExtensionProxyAuth | undefined {
+    const endpoints = this.endpoints;
+    if (!this.auth || !endpoints) return undefined;
+    return listener === endpoints.http || listener === endpoints.socks5
+      ? { ...this.auth }
+      : undefined;
+  }
+
+  /**
    * Opens the host, handshakes, brings the tunnel up and routes the browser
    * through it. Resolves with the local proxy endpoints.
    */
@@ -260,21 +294,37 @@ export class WarrenBrowserVpn {
             'Firefox requires private-browsing access to control proxy settings',
           );
         }
+        // proxy.settings cannot carry the listener's credentials: only a
+        // per-request answer can.
+        if (!this.chrome.proxy.onRequest) {
+          throw new WarrenExtensionError(
+            'proxy_uncontrollable',
+            'this browser cannot route requests one by one',
+          );
+        }
       }
       const hello = await this.request({ type: 'hello', protocol: EXTENSION_PROTOCOL_VERSION });
       if (hello.type !== 'hello' || hello.protocol !== EXTENSION_PROTOCOL_VERSION) {
         throw new WarrenExtensionError('protocol', 'host speaks an unsupported protocol version');
       }
+      const httpProxy = this.platform === 'chromium' ? true : options.httpProxy;
       const res = await this.request({
         type: 'connect',
         mnemonic: options.mnemonic,
         ...(options.selector ? { selector: options.selector } : {}),
         ...(options.entrySelector ? { entrySelector: options.entrySelector } : {}),
-        ...(options.httpProxy !== undefined ? { httpProxy: options.httpProxy } : {}),
+        ...(httpProxy !== undefined ? { httpProxy } : {}),
         ...(options.daita !== undefined ? { daita: options.daita } : {}),
       });
       if (res.type !== 'connect') {
         throw new WarrenExtensionError('protocol', 'unexpected host response to connect');
+      }
+      const auth = listenerAuth(res.auth);
+      if (!auth) {
+        throw new WarrenExtensionError(
+          'protocol',
+          'the host did not hand over the credentials its listeners demand',
+        );
       }
       // Leak hardening BEFORE routing: WebRTC UDP candidates and the DNS
       // prefetcher (which resolves locally even under SOCKS5) must be off
@@ -282,14 +332,19 @@ export class WarrenBrowserVpn {
       await hardenBrowserLeaks(this.chrome.privacy.network);
       hardened = true;
       const split = options.split ?? DEFAULT_SPLIT;
+      // Held before the browser is pointed at the listener, whose first
+      // challenge can come as soon as the routing is set.
+      this.endpoints = res.endpoints;
+      this.auth = auth;
       await this.applyProxy(res.endpoints, split);
       await this.verifyRouting(split);
       this.proxied = true;
       this.tunnelUp = true;
-      this.endpoints = res.endpoints;
       if (heldHandler) this.chrome.proxy.onRequest?.removeListener(heldHandler);
       return res.endpoints;
     } catch (error) {
+      this.endpoints = undefined;
+      this.auth = undefined;
       if (hardened) await this.restoreBrowserSettings(before, leaksHeld).catch(() => undefined);
       this.onRequestHandler = heldHandler;
       this.closePort();
@@ -428,17 +483,18 @@ export class WarrenBrowserVpn {
     this.proxied = false;
     this.tunnelUp = false;
     this.endpoints = undefined;
+    this.auth = undefined;
     this.closePort();
   }
 
   private async applyProxy(endpoints: ExtensionEndpoints, split: SplitTunnelConfig): Promise<void> {
     if (this.platform === 'firefox') {
-      // `only` mode needs a per-request decision that proxy.settings cannot
-      // express; drive it through proxy.onRequest instead.
-      if (split.mode === 'only' && this.chrome.proxy.onRequest) {
-        this.registerFirefoxOnRequest(endpoints.socks5, split);
-        return;
-      }
+      // The handler carries the listener's credentials, so it routes every
+      // mode. The settings below are what holds the browser on the (then
+      // refusing) listener if the handler is ever gone; `only` mode cannot be
+      // expressed there and has the handler alone.
+      this.registerFirefoxOnRequest(endpoints.socks5, split);
+      if (split.mode === 'only') return;
       const result = await this.chrome.proxy.settings.set({
         value: buildFirefoxProxyValue(endpoints.socks5, split),
       });
@@ -451,22 +507,28 @@ export class WarrenBrowserVpn {
       }
       return;
     }
+    if (!endpoints.http) {
+      throw new WarrenExtensionError('protocol', 'the host serves no HTTP listener');
+    }
     await this.chrome.proxy.settings.set({
-      value: buildChromiumProxyValue(endpoints.socks5, split),
+      value: buildChromiumProxyValue(endpoints.http, split),
     });
   }
 
   private registerFirefoxOnRequest(socks5: string, split: SplitTunnelConfig): void {
     const sep = socks5.lastIndexOf(':');
-    const proxyInfo = {
+    const listener = {
       type: 'socks',
       host: socks5.slice(0, sep),
       port: Number(socks5.slice(sep + 1)),
-      proxyDNS: true,
     };
     const handler = (request: { url: string }): unknown => {
       const host = new URL(request.url).hostname;
-      return shouldTunnelHost(host, split) ? proxyInfo : { type: 'direct' };
+      if (!shouldTunnelHost(host, split)) return { type: 'direct' };
+      // Read per request: once the host is gone its port is anyone's to take,
+      // and the request stalls instead of reaching it.
+      const auth = this.forListener(socks5);
+      return auth ? { ...listener, proxyDNS: true, ...auth } : FAIL_CLOSED_PROXY;
     };
     this.onRequestHandler = handler;
     this.chrome.proxy.onRequest?.addListener(handler, { urls: ['<all_urls>'] });
@@ -489,6 +551,8 @@ export class WarrenBrowserVpn {
     port.onDisconnect.addListener(() => {
       this.portDead = true;
       this.tunnelUp = false;
+      // The host took its listeners with it: nothing may answer for them now.
+      this.auth = undefined;
       const wasProxied = this.proxied;
       for (const [, waiter] of this.pending) {
         waiter.reject(

@@ -3,7 +3,15 @@
   "name": "Warren VPN (example)",
   "version": "0.1.0",
   "description": "Routes this browser through a Warren tunnel via the local native host.",
-  "permissions": ["proxy", "privacy", "nativeMessaging", "storage"],
+  "permissions": [
+    "proxy",
+    "privacy",
+    "nativeMessaging",
+    "storage",
+    "webRequest",
+    "webRequestAuthProvider"
+  ],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js",
     "scripts": ["background.js"],

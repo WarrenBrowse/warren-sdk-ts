@@ -2,7 +2,12 @@
 // `@warrenbrowse/sdk-extension` into ./sdk-extension.js (see example/README.md).
 // The mnemonic lives encrypted in the extension vault and is handed to the
 // local native host only at connect time; it never touches a page or the network.
-import { WarrenBrowserVpn, WarrenKeyring, chromeStorageArea } from './sdk-extension.js';
+import {
+  WarrenBrowserVpn,
+  WarrenKeyring,
+  attachChromiumProxyAuth,
+  chromeStorageArea,
+} from './sdk-extension.js';
 
 const keyring = new WarrenKeyring({
   local: chromeStorageArea(chrome.storage.local),
@@ -15,6 +20,13 @@ function getVpn() {
     onState: (state) => void chrome.storage.session.set({ vpnState: state }),
   });
   return vpn;
+}
+
+// Chromium reaches the host's HTTP listener, which answers every request
+// without credentials with a 407; the session credentials the client holds
+// answer it. Firefox carries them on its proxy.onRequest answers instead.
+if (typeof chrome.runtime.getBrowserInfo !== 'function') {
+  attachChromiumProxyAuth(chrome.webRequest, { local: getVpn() });
 }
 
 // Open the full-tab onboarding on first install (a popup is too small and

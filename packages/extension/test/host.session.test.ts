@@ -1,22 +1,30 @@
 import { describe, expect, it } from 'vitest';
 import { callerAllowed } from '../src/host/run.js';
 import { HostSession, type HostTunnel, type HostTunnelFactory } from '../src/host/session.js';
-import type { HostMessage } from '../src/protocol.js';
+import { EXTENSION_PROTOCOL_VERSION, type HostMessage } from '../src/protocol.js';
+
+const LISTENERS = { socks5: '127.0.0.1:1080', http: '127.0.0.1:8118' };
+const AUTH = { username: 'warren', password: 'session-secret' };
 
 class FakeTunnel implements HostTunnel {
   shutdownCalls = 0;
   onStateCb: ((state: string) => void) | undefined;
   seenMnemonic: string | undefined;
   seenConnect: unknown;
-  constructor(private readonly failWith?: string) {}
+  constructor(
+    private readonly failWith?: string,
+    private readonly auth: Partial<typeof AUTH> = AUTH,
+  ) {}
 
-  async connect(options?: unknown): Promise<{ socks5: string; http?: string }> {
+  async connect(
+    options?: unknown,
+  ): Promise<{ socks5: string; http?: string; username: string; password: string }> {
     this.seenConnect = options;
     if (this.failWith) {
       throw Object.assign(new Error(this.failWith), { code: 'api' });
     }
     this.onStateCb?.('connected');
-    return { socks5: '127.0.0.1:1080' };
+    return { ...LISTENERS, ...this.auth } as typeof LISTENERS & typeof AUTH;
   }
   async shutdown(): Promise<void> {
     this.shutdownCalls += 1;
@@ -51,13 +59,24 @@ function makeSession(
 describe('HostSession', () => {
   it('answers hello with the protocol version only (identity-less host)', async () => {
     const { session, sent } = makeSession();
-    await session.handle({ id: 1, type: 'hello', protocol: 1 });
-    expect(sent[0]).toEqual({ id: 1, ok: true, type: 'hello', protocol: 1 });
+    await session.handle({ id: 1, type: 'hello', protocol: EXTENSION_PROTOCOL_VERSION });
+    expect(sent[0]).toEqual({
+      id: 1,
+      ok: true,
+      type: 'hello',
+      protocol: EXTENSION_PROTOCOL_VERSION,
+    });
   });
 
   it('rejects an unknown protocol version', async () => {
     const { session, sent } = makeSession();
     await session.handle({ id: 1, type: 'hello', protocol: 42 });
+    expect(sent[0]).toMatchObject({ id: 1, ok: false, code: 'protocol' });
+  });
+
+  it('refuses a protocol 1 extension, which cannot answer its listeners', async () => {
+    const { session, sent } = makeSession();
+    await session.handle({ id: 1, type: 'hello', protocol: 1 });
     expect(sent[0]).toMatchObject({ id: 1, ok: false, code: 'protocol' });
   });
 
@@ -71,8 +90,18 @@ describe('HostSession', () => {
       id: 2,
       ok: true,
       type: 'connect',
-      endpoints: { socks5: '127.0.0.1:1080' },
+      endpoints: LISTENERS,
+      auth: AUTH,
     });
+  });
+
+  it('fails the connect and tears the tunnel down when it hands over no credentials', async () => {
+    const tunnel = new FakeTunnel(undefined, { username: 'warren' });
+    const { session, sent } = makeSession(tunnel);
+    await session.handle({ id: 3, type: 'connect', mnemonic: M });
+
+    expect(sent.at(-1)).toMatchObject({ id: 3, ok: false, code: 'protocol' });
+    expect(tunnel.shutdownCalls).toBe(1);
   });
 
   it('maps a tunnel failure to an error response and tears the tunnel down', async () => {
@@ -98,11 +127,12 @@ describe('HostSession', () => {
 
     await session.handle({ id: 2, type: 'connect', mnemonic: M });
     await session.handle({ id: 3, type: 'status' });
-    expect(sent.at(-1)).toMatchObject({
+    expect(sent.at(-1)).toEqual({
       id: 3,
       ok: true,
+      type: 'status',
       state: 'connected',
-      endpoints: { socks5: '127.0.0.1:1080' },
+      endpoints: LISTENERS,
     });
 
     await session.handle({ id: 4, type: 'disconnect' });

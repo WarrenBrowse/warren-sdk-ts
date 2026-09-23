@@ -2,6 +2,7 @@ import {
   EXTENSION_PROTOCOL_VERSION,
   type ExtensionEndpoints,
   type ExtensionExitLocation,
+  type ExtensionProxyAuth,
   type ExtensionVpnState,
   type HostMessage,
   type HostRequest,
@@ -13,8 +14,13 @@ export interface HostTunnel {
     selector?: { exitPubkeyHex?: string; country?: string; city?: string };
     entrySelector?: { country?: string; city?: string };
     httpProxy?: boolean;
-  }): Promise<ExtensionEndpoints>;
+  }): Promise<ExtensionEndpoints & ExtensionProxyAuth>;
   shutdown(): Promise<void>;
+}
+
+/** Whether a value is a credential a listener can carry: a non-empty string. */
+function isCredential(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0;
 }
 
 /**
@@ -138,15 +144,29 @@ export class HostSession {
         },
         { ...(request.daita !== undefined ? { daita: request.daita } : {}) },
       );
-      const endpoints = await tunnel.connect({
+      const { socks5, http, username, password } = await tunnel.connect({
         ...(request.selector ? { selector: request.selector } : {}),
         ...(request.entrySelector ? { entrySelector: request.entrySelector } : {}),
         ...(request.httpProxy !== undefined ? { httpProxy: request.httpProxy } : {}),
       });
+      if (!isCredential(username) || !isCredential(password)) {
+        throw Object.assign(new Error('the tunnel reported no listener credentials'), {
+          code: 'protocol',
+        });
+      }
+      const endpoints: ExtensionEndpoints = { socks5, ...(http ? { http } : {}) };
       this.tunnel = tunnel;
+      // Only the addresses stay here, for status: the credentials cross the
+      // channel once, in this answer.
       this.endpoints = endpoints;
       this.state = 'connected';
-      this.options.send({ id: request.id, ok: true, type: 'connect', endpoints });
+      this.options.send({
+        id: request.id,
+        ok: true,
+        type: 'connect',
+        endpoints,
+        auth: { username, password },
+      });
     } catch (error) {
       // Fail-closed: never leave a half-built tunnel running after an error.
       await tunnel?.shutdown().catch(() => undefined);

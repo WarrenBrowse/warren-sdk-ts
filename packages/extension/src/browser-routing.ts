@@ -46,7 +46,10 @@
 
 import { base64urlnopad } from '@scure/base';
 import { WarrenExtensionError } from './client.js';
-import { type SplitTunnelConfig, shouldTunnelHost } from './split.js';
+import type { ExtensionProxyAuth } from './protocol.js';
+import { FAIL_CLOSED_PROXY, type SplitTunnelConfig, shouldTunnelHost } from './split.js';
+
+export { FAIL_CLOSED_PROXY };
 
 /** The fixed username the credential rides under; only the password varies. */
 export const CREDENTIAL_USERNAME = 'warren';
@@ -153,15 +156,42 @@ export interface ProxySettingsLike {
   clear(details?: { scope?: string }): Promise<void> | void;
 }
 
-/** The `chrome.webRequest` subset used to answer the ingress `407`. */
+/** What `webRequest.onAuthRequired` says about a challenge. */
+export interface AuthChallenge {
+  isProxy: boolean;
+  requestId?: string;
+  /** The proxy or server asking, as the browser dialed it. */
+  challenger?: { host: string; port: number };
+}
+
+/** The `chrome.webRequest` subset used to answer a proxy's `407`. */
 export interface WebRequestLike {
   onAuthRequired: {
     addListener(
-      listener: (details: { isProxy: boolean }, callback: (response: unknown) => void) => void,
+      listener: (details: AuthChallenge, callback: (response: unknown) => void) => void,
       filter: { urls: string[] },
       extra?: string[],
     ): void;
   };
+}
+
+/** The native host's listener credentials, held in memory by the multi-hop
+ * tier (`WarrenBrowserVpn` is one). */
+export interface LocalProxyAuth {
+  /** The credentials of the live session whose listener is at `listener`
+   * (`host:port`), or `undefined` when no live session owns that address. */
+  forListener(listener: string): ExtensionProxyAuth | undefined;
+}
+
+/** Where each proxy's credentials come from. Each answers only the proxy it
+ * belongs to: the ingress credential never goes to a loopback listener, and a
+ * listener's credentials never leave the machine. */
+export interface ProxyAuthSources {
+  /** The browser-proxy tier: its credential, and the routing record naming
+   * the ingress it may be presented to. */
+  ingress?: { credentials: CredentialProvider; routing: RoutingStore };
+  /** The multi-hop tier's local listeners. */
+  local?: LocalProxyAuth;
 }
 
 /** The Firefox `proxy` subset: per-request resolution plus an error signal. */
@@ -181,20 +211,18 @@ export interface RoutingStorageArea {
 
 /** A Firefox ProxyInfo entry, as returned from `proxy.onRequest`. */
 export interface FirefoxProxyInfo {
-  type: 'https' | 'masque' | 'direct';
+  type: 'https' | 'masque' | 'socks' | 'direct';
   host?: string;
   port?: number;
   masqueTemplate?: string;
   proxyAuthorizationHeader?: string;
   failoverTimeout?: number;
+  /** SOCKS only: resolve names at the proxy. */
+  proxyDNS?: boolean;
+  /** SOCKS only (RFC 1929); Firefox refuses them on the other types. */
+  username?: string;
+  password?: string;
 }
-
-/** The proxy-info a Firefox request gets when routing must fail closed: an
- * ingress with no credential, which stalls at the ingress `407` rather than
- * escaping to a direct route. A bare `{ type: 'direct' }` would leak. */
-export const FAIL_CLOSED_PROXY: FirefoxProxyInfo[] = [
-  { type: 'https', host: '127.0.0.1', port: 1 },
-];
 
 /** Where a lockdown points the browser: loopback port 1, which nothing listens
  * on, so a request fails at once instead of waiting on a timeout. */
@@ -209,17 +237,21 @@ function basicAuth(credential: string): string {
   return `Basic ${Buffer.from(raw, 'binary').toString('base64')}`;
 }
 
+function isLoopbackHost(hostname: string): boolean {
+  const host = hostname.toLowerCase();
+  return (
+    host === 'localhost' ||
+    host.endsWith('.localhost') ||
+    host === '127.0.0.1' ||
+    host === '::1' ||
+    host === '[::1]'
+  );
+}
+
 /** Whether a URL addresses this machine (never routed through the ingress). */
 function isLoopbackUrl(url: string): boolean {
   try {
-    const host = new URL(url).hostname.toLowerCase();
-    return (
-      host === 'localhost' ||
-      host.endsWith('.localhost') ||
-      host === '127.0.0.1' ||
-      host === '::1' ||
-      host === '[::1]'
-    );
+    return isLoopbackHost(new URL(url).hostname);
   } catch {
     return false;
   }
@@ -383,33 +415,67 @@ function controllable(level: string): boolean {
   return level === 'controllable_by_this_extension' || level === 'controlled_by_this_extension';
 }
 
+/** How many answered loopback challenges are remembered to spot a refusal. */
+const ANSWERED_MEMORY = 512;
+
 /**
- * Registers the async blocking auth provider that answers the ingress `407`
- * with the credential of the moment. Registered ONCE for the extension's life:
- * it reads the credential fresh on each challenge, so an epoch rollover needs no
- * re-registration and no routing change. When the store holds no credential it
- * cancels the request (a stall) rather than letting the browser prompt the user
- * for a proxy password it cannot know.
+ * Registers the async blocking auth provider that answers a proxy's `407`,
+ * with the credential of the proxy that asked: the challenger's host and port
+ * decide. A loopback challenger gets the native host's session credentials,
+ * and only from the live session owning that listener. Any other challenger
+ * gets the browser-proxy credential only when it is the ingress the routing
+ * record names. Everything else is cancelled, which stalls the request rather
+ * than letting the browser prompt for a password it cannot know.
+ *
+ * Registered ONCE for the extension's life: it reads both sources fresh on
+ * each challenge, so an epoch rollover or a new tunnel needs no
+ * re-registration and no routing change.
  */
 export function attachChromiumProxyAuth(
   webRequest: WebRequestLike,
-  credentials: CredentialProvider,
+  sources: ProxyAuthSources,
 ): void {
+  // A second challenge for a request already answered means the listener
+  // refused the credentials: answering again would loop, so it stalls.
+  const answered = new Set<string>();
+  async function answer(details: AuthChallenge): Promise<unknown> {
+    const challenger = details.challenger;
+    if (!challenger) return { cancel: true };
+    if (isLoopbackHost(challenger.host)) {
+      const auth = sources.local?.forListener(`${challenger.host}:${challenger.port}`);
+      if (!auth || details.requestId === undefined || answered.has(details.requestId)) {
+        return { cancel: true };
+      }
+      answered.add(details.requestId);
+      if (answered.size > ANSWERED_MEMORY) {
+        answered.delete(answered.values().next().value as string);
+      }
+      return { authCredentials: auth };
+    }
+    const ingress = sources.ingress;
+    if (!ingress) return { cancel: true };
+    const record = await ingress.routing.load();
+    if (
+      record?.tier !== 'ingress' ||
+      record.endpoint.host.toLowerCase() !== challenger.host.toLowerCase() ||
+      record.endpoint.port !== challenger.port
+    ) {
+      return { cancel: true };
+    }
+    const credential = await ingress.credentials.current();
+    return credential === undefined
+      ? { cancel: true }
+      : { authCredentials: { username: CREDENTIAL_USERNAME, password: credential } };
+  }
   webRequest.onAuthRequired.addListener(
     (details, callback) => {
-      // A site's own 401 is not ours to answer: the credential is for the
-      // ingress and must never be offered to a destination.
+      // A site's own 401 is not ours to answer: no credential here is for a
+      // destination.
       if (!details.isProxy) {
         callback({});
         return;
       }
-      void credentials.current().then((credential) => {
-        callback(
-          credential === undefined
-            ? { cancel: true }
-            : { authCredentials: { username: CREDENTIAL_USERNAME, password: credential } },
-        );
-      });
+      answer(details).then(callback, () => callback({ cancel: true }));
     },
     { urls: ['<all_urls>'] },
     ['asyncBlocking'],
@@ -467,9 +533,14 @@ export function firefoxProxyInfoFor(
  * {@link RoutingRecord} on every request, so it is correct immediately after a
  * service-worker teardown or a browser restart with no in-memory state, and it
  * decides per request (loopback and bypassed sites go direct, everything else
- * through the ingress, or nowhere under a lockdown). If its own store cannot be
- * read it fails closed ({@link FAIL_CLOSED_PROXY}) rather than leaking to a
- * direct route.
+ * through the ingress or the native host's SOCKS5 listener, or nowhere under a
+ * lockdown). If its own store cannot be read it fails closed
+ * ({@link FAIL_CLOSED_PROXY}) rather than leaking to a direct route.
+ *
+ * A multi-hop record is answered with its listener and the session
+ * credentials `local` holds for it. Without them (a restart, a dead host) the
+ * request fails closed: the listener's port is anyone's to take once its host
+ * is gone.
  *
  * Firefox answers `direct` with the browser's own proxy settings when some are
  * set, so `direct` here means "not through the ingress", which leaves a local
@@ -479,6 +550,7 @@ export function attachFirefoxRouting(
   proxy: FirefoxProxyLike,
   store: RoutingStore,
   credentials: CredentialProvider,
+  local?: LocalProxyAuth,
 ): void {
   proxy.onRequest.addListener(
     async (request) => {
@@ -504,7 +576,10 @@ export function attachFirefoxRouting(
           : FAIL_CLOSED_PROXY;
       }
       if (!shouldTunnelHost(host, state.split)) return { type: 'direct' };
-      if (state.tier === 'multihop') return socksProxyInfo(state.socks5);
+      if (state.tier === 'multihop') {
+        const auth = local?.forListener(state.socks5);
+        return auth ? { ...socksProxyInfo(state.socks5), ...auth } : FAIL_CLOSED_PROXY;
+      }
       const credential = await credentials.current();
       return firefoxProxyInfoFor(state.endpoint, credential);
     },

@@ -1,12 +1,15 @@
 /**
  * `@warrenbrowse/sdk-extension`: browser-scope, non-root Warren VPN for a
- * Chromium extension (Manifest V3).
+ * Chromium or Firefox extension (Manifest V3).
  *
  * The datapath cannot run in the browser; a local native messaging host
  * (`@warrenbrowse/sdk-extension/host`, backed by `@warrenbrowse/sdk-node`)
- * terminates the tunnel and opens a local SOCKS5 proxy, and this entry routes
- * the whole browser through it with `chrome.proxy` while closing the WebRTC
- * leak. Requires the `proxy`, `privacy` and `nativeMessaging` permissions.
+ * terminates the tunnel and opens local SOCKS5 and HTTP proxy listeners that
+ * demand per-session credentials, and this entry routes the whole browser
+ * through them with `chrome.proxy` while closing the WebRTC leak. Requires the
+ * `proxy`, `privacy` and `nativeMessaging` permissions, plus on Chromium
+ * `webRequest`, `webRequestAuthProvider` and a host permission for every URL,
+ * so the listener's `407` reaches `attachChromiumProxyAuth`.
  */
 export {
   WarrenBrowserVpn,
@@ -28,6 +31,7 @@ export {
   type ExtensionExitLocation,
   type ExtensionEntryQuery,
   type ExtensionExitQuery,
+  type ExtensionProxyAuth,
   type ExtensionVpnState,
   type HostMessage,
   type HostRequest,
@@ -68,12 +72,15 @@ export {
   memoryRoutingStore,
   readChromiumRouting,
   routingStoreOver,
+  type AuthChallenge,
   type CredentialProvider,
   type FirefoxProxyInfo,
   type FirefoxProxyLike,
   type IngressEndpoint,
+  type LocalProxyAuth,
   type LockdownState,
   type MultihopRoutingState,
+  type ProxyAuthSources,
   type ProxySettingsLike,
   type RoutingRecord,
   type RoutingState,

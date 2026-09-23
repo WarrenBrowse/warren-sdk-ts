@@ -1,13 +1,18 @@
 /**
- * Extension <-> native-host protocol (version 1).
+ * Extension <-> native-host protocol (version 2).
  *
  * Chrome's native messaging carries whole JSON values, so these shapes are the
- * entire wire contract. The mnemonic never crosses it: the host owns the
- * identity, the extension only selects exits and toggles options.
+ * entire wire contract. The mnemonic crosses it only inside a connect or
+ * account request, and the host does not keep it.
+ *
+ * Version 2 is the version whose host listeners demand credentials: the
+ * connect answer carries them, and a version 1 peer on either side, which
+ * would route a browser through listeners it cannot authenticate to, is
+ * refused at `hello`.
  */
 
 /** Protocol version spoken by this package. */
-export const EXTENSION_PROTOCOL_VERSION = 1;
+export const EXTENSION_PROTOCOL_VERSION = 2;
 
 /** Default native messaging host name the browser resolves to the local binary. */
 export const DEFAULT_HOST_NAME = 'com.warrenbrowse.host';
@@ -75,10 +80,21 @@ export type HostRequest =
       mnemonic: string;
     };
 
-/** Local proxy endpoints reported by the host once connected. */
+/** Local proxy listener addresses reported by the host once connected. */
 export interface ExtensionEndpoints {
   socks5: string;
   http?: string;
+}
+
+/**
+ * The credentials both listeners demand (RFC 1929 on SOCKS5,
+ * `Proxy-Authorization: Basic` on HTTP), fresh for each tunnel. A per-session
+ * secret: it crosses this channel once, in the connect answer, and lives in
+ * the extension's memory only as long as the host that minted it.
+ */
+export interface ExtensionProxyAuth {
+  username: string;
+  password: string;
 }
 
 /** Responses the host sends back, correlated by `id`. */
@@ -93,7 +109,13 @@ export type HostResponse =
       state: ExtensionVpnState;
       endpoints?: ExtensionEndpoints;
     }
-  | { id: number; ok: true; type: 'connect'; endpoints: ExtensionEndpoints }
+  | {
+      id: number;
+      ok: true;
+      type: 'connect';
+      endpoints: ExtensionEndpoints;
+      auth: ExtensionProxyAuth;
+    }
   | { id: number; ok: true; type: 'disconnect' }
   | { id: number; ok: true; type: 'exits'; locations: ExtensionExitLocation[] }
   | {

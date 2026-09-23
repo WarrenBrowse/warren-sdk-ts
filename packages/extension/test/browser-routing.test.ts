@@ -235,9 +235,14 @@ describe('leak hardening', () => {
 });
 
 describe('attachChromiumProxyAuth', () => {
+  type Challenge = {
+    isProxy: boolean;
+    requestId?: string;
+    challenger?: { host: string; port: number };
+  };
   function fakeWebRequest() {
     const rec: {
-      listener?: (details: { isProxy: boolean }, cb: (r: unknown) => void) => void;
+      listener?: (details: Challenge, cb: (r: unknown) => void) => void;
       extra?: string[];
     } = {};
     return {
@@ -245,7 +250,7 @@ describe('attachChromiumProxyAuth', () => {
       webRequest: {
         onAuthRequired: {
           addListener: (
-            listener: (details: { isProxy: boolean }, cb: (r: unknown) => void) => void,
+            listener: (details: Challenge, cb: (r: unknown) => void) => void,
             _filter: { urls: string[] },
             extra?: string[],
           ) => {
@@ -256,41 +261,129 @@ describe('attachChromiumProxyAuth', () => {
       },
     };
   }
-  const answer = (rec: ReturnType<typeof fakeWebRequest>['rec'], isProxy: boolean) =>
-    new Promise((resolve) => rec.listener?.({ isProxy }, resolve));
+  const answer = (rec: ReturnType<typeof fakeWebRequest>['rec'], details: Challenge) =>
+    new Promise((resolve) => rec.listener?.(details, resolve));
+
+  const INGRESS = { host: HTTPS.host, port: HTTPS.port };
+  const LISTENER = { host: '127.0.0.1', port: 8118 };
+  const SESSION = { username: 'warren', password: 'session-secret' };
+  /** The native host's live session, whose HTTP listener is `LISTENER`. */
+  const local = {
+    forListener: (address: string) => (address === '127.0.0.1:8118' ? SESSION : undefined),
+  };
+  let request = 0;
+  const challenge = (challenger: { host: string; port: number }): Challenge => ({
+    isProxy: true,
+    requestId: String(++request),
+    challenger,
+  });
+  async function routedAt(record: RoutingState | LockdownState | MultihopRoutingState) {
+    const routing = memoryRoutingStore();
+    await routing.save(record);
+    return routing;
+  }
 
   it('registers an async blocking provider once, for every URL', () => {
     const { webRequest, rec } = fakeWebRequest();
-    attachChromiumProxyAuth(webRequest, provider);
+    attachChromiumProxyAuth(webRequest, { local });
     expect(rec.extra).toEqual(['asyncBlocking']);
     expect(rec.listener).toBeDefined();
   });
 
-  it('answers a proxy challenge with the credential of the moment', async () => {
+  it('answers the ingress it routes through with the credential of the moment', async () => {
     const { webRequest, rec } = fakeWebRequest();
     let credential = CREDENTIAL;
-    attachChromiumProxyAuth(webRequest, { current: async () => credential });
-    expect(await answer(rec, true)).toEqual({
+    attachChromiumProxyAuth(webRequest, {
+      ingress: { credentials: { current: async () => credential }, routing: await routedAt(STATE) },
+    });
+    expect(await answer(rec, challenge(INGRESS))).toEqual({
       authCredentials: { username: 'warren', password: CREDENTIAL },
     });
     // The epoch rolled: the next challenge gets the next credential, with no
     // routing change in between.
     credential = 'next-epoch';
-    expect(await answer(rec, true)).toEqual({
+    expect(await answer(rec, challenge(INGRESS))).toEqual({
       authCredentials: { username: 'warren', password: 'next-epoch' },
     });
   });
 
-  it('cancels the request rather than prompting when no credential exists', async () => {
+  it('answers the native host listener with the session credentials, never the ingress one', async () => {
     const { webRequest, rec } = fakeWebRequest();
-    attachChromiumProxyAuth(webRequest, noCredential);
-    expect(await answer(rec, true)).toEqual({ cancel: true });
+    attachChromiumProxyAuth(webRequest, {
+      ingress: { credentials: provider, routing: await routedAt(STATE) },
+      local,
+    });
+    expect(await answer(rec, challenge(LISTENER))).toEqual({ authCredentials: SESSION });
   });
 
-  it('never offers the credential to a site challenge', async () => {
+  it('gives a loopback challenge nothing when no live session owns that listener', async () => {
     const { webRequest, rec } = fakeWebRequest();
-    attachChromiumProxyAuth(webRequest, provider);
-    expect(await answer(rec, false)).toEqual({});
+    attachChromiumProxyAuth(webRequest, {
+      ingress: { credentials: provider, routing: await routedAt(STATE) },
+      local,
+    });
+    expect(await answer(rec, challenge({ host: '127.0.0.1', port: 9999 }))).toEqual({
+      cancel: true,
+    });
+    expect(await answer(rec, challenge({ host: 'localhost', port: 443 }))).toEqual({
+      cancel: true,
+    });
+  });
+
+  it('never hands the session credentials to the ingress', async () => {
+    const { webRequest, rec } = fakeWebRequest();
+    attachChromiumProxyAuth(webRequest, { local });
+    expect(await answer(rec, challenge(INGRESS))).toEqual({ cancel: true });
+  });
+
+  it('answers no challenger the routing does not name', async () => {
+    const { webRequest, rec } = fakeWebRequest();
+    attachChromiumProxyAuth(webRequest, {
+      ingress: { credentials: provider, routing: await routedAt(STATE) },
+      local,
+    });
+    expect(await answer(rec, challenge({ host: 'other.example.net', port: 443 }))).toEqual({
+      cancel: true,
+    });
+    expect(await answer(rec, challenge({ host: HTTPS.host, port: 8443 }))).toEqual({
+      cancel: true,
+    });
+    expect(await answer(rec, { isProxy: true, requestId: 'no-challenger' })).toEqual({
+      cancel: true,
+    });
+    for (const record of [LOCKDOWN, MULTIHOP]) {
+      const other = fakeWebRequest();
+      attachChromiumProxyAuth(other.webRequest, {
+        ingress: { credentials: provider, routing: await routedAt(record) },
+      });
+      expect(await answer(other.rec, challenge(INGRESS))).toEqual({ cancel: true });
+    }
+  });
+
+  it('stalls a request whose session credentials the listener refused once', async () => {
+    const { webRequest, rec } = fakeWebRequest();
+    attachChromiumProxyAuth(webRequest, { local });
+    const refused = challenge(LISTENER);
+    expect(await answer(rec, refused)).toEqual({ authCredentials: SESSION });
+    expect(await answer(rec, refused)).toEqual({ cancel: true });
+  });
+
+  it('cancels the request rather than prompting when no credential exists', async () => {
+    const { webRequest, rec } = fakeWebRequest();
+    attachChromiumProxyAuth(webRequest, {
+      ingress: { credentials: noCredential, routing: await routedAt(STATE) },
+    });
+    expect(await answer(rec, challenge(INGRESS))).toEqual({ cancel: true });
+  });
+
+  it('never offers a credential to a site challenge', async () => {
+    const { webRequest, rec } = fakeWebRequest();
+    attachChromiumProxyAuth(webRequest, {
+      ingress: { credentials: provider, routing: await routedAt(STATE) },
+      local,
+    });
+    expect(await answer(rec, { ...challenge(INGRESS), isProxy: false })).toEqual({});
+    expect(await answer(rec, { ...challenge(LISTENER), isProxy: false })).toEqual({});
   });
 });
 
@@ -398,7 +491,13 @@ describe('attachFirefoxRouting', () => {
 });
 
 describe('attachFirefoxRouting under a lockdown', () => {
-  function listen(store: RoutingStore) {
+  const SESSION = { username: 'warren', password: 'session-secret' };
+  function listen(
+    store: RoutingStore,
+    local = {
+      forListener: (address: string) => (address === MULTIHOP.socks5 ? SESSION : undefined),
+    },
+  ) {
     let listener: ((r: { url: string }) => unknown) | undefined;
     attachFirefoxRouting(
       {
@@ -410,6 +509,7 @@ describe('attachFirefoxRouting under a lockdown', () => {
       },
       store,
       provider,
+      local,
     );
     return (url: string) => listener?.({ url });
   }
@@ -433,7 +533,7 @@ describe('attachFirefoxRouting under a lockdown', () => {
     expect(await route('https://api.example.com.evil.net/')).toEqual(FAIL_CLOSED_PROXY);
   });
 
-  it('answers a multi-hop record with its SOCKS endpoint, so a restart finds the tunnel, dead or alive', async () => {
+  it('answers a multi-hop record with its SOCKS endpoint and the session credentials', async () => {
     const store = memoryRoutingStore();
     await store.save(MULTIHOP);
     const route = listen(store);
@@ -442,7 +542,17 @@ describe('attachFirefoxRouting under a lockdown', () => {
       host: '127.0.0.1',
       port: 1080,
       proxyDNS: true,
+      username: 'warren',
+      password: 'session-secret',
     });
+    expect(await route('https://personal.example/')).toEqual({ type: 'direct' });
+  });
+
+  it('stalls a multi-hop record no live session owns, as after a restart', async () => {
+    const store = memoryRoutingStore();
+    await store.save(MULTIHOP);
+    const route = listen(store, { forListener: () => undefined });
+    expect(await route('https://app.work.example/')).toEqual(FAIL_CLOSED_PROXY);
     expect(await route('https://personal.example/')).toEqual({ type: 'direct' });
   });
 

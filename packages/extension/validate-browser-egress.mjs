@@ -207,7 +207,7 @@ try {
   // 7. connect through the native host (multi-hop to an NL exit)
   const conn = await rt('connect', { selector: { country: 'NL' } });
   if (!conn?.ok) throw new Error(`connect: ${JSON.stringify(conn)}`);
-  log(`connected       : socks5 ${conn.endpoints?.socks5 || '?'}`);
+  log(`connected       : http ${conn.endpoints?.http || '?'}`);
 
   // 8. confirm chrome.proxy is actually controlled by us and points at the host
   const proxy = await page.evaluate(

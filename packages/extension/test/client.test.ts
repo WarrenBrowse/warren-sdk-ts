@@ -5,7 +5,10 @@ import {
   WarrenBrowserVpn,
   WarrenExtensionError,
 } from '../src/index.js';
-import type { HostRequest } from '../src/protocol.js';
+import { EXTENSION_PROTOCOL_VERSION, type HostRequest } from '../src/protocol.js';
+
+const LISTENERS = { socks5: '127.0.0.1:1080', http: '127.0.0.1:8118' };
+const AUTH = { username: 'warren', password: 'session-secret' };
 
 /** A scripted fake of the chrome extension API surface the client uses. */
 function fakeChrome(
@@ -99,9 +102,9 @@ class FakePort implements NativePort {
 /** A host that answers hello and connect successfully. */
 function healthyHost(req: HostRequest, port: FakePort): void {
   if (req.type === 'hello') {
-    port.emit({ id: req.id, ok: true, type: 'hello', protocol: 1, address: 'wbTest' });
+    port.emit({ id: req.id, ok: true, type: 'hello', protocol: EXTENSION_PROTOCOL_VERSION });
   } else if (req.type === 'connect') {
-    port.emit({ id: req.id, ok: true, type: 'connect', endpoints: { socks5: '127.0.0.1:1080' } });
+    port.emit({ id: req.id, ok: true, type: 'connect', endpoints: LISTENERS, auth: AUTH });
   } else if (req.type === 'disconnect') {
     port.emit({ id: req.id, ok: true, type: 'disconnect' });
   }
@@ -122,21 +125,89 @@ describe('WarrenBrowserVpn.connect', () => {
     expect(calls[webrtcIndex]).toBe('webrtc.set:disable_non_proxied_udp');
   });
 
-  it('points chrome.proxy at the SOCKS5 endpoint with a localhost bypass', async () => {
+  it('points chrome.proxy at the authenticated HTTP listener with a localhost bypass', async () => {
     const { chrome, calls } = fakeChrome(healthyHost);
     await new WarrenBrowserVpn({ chrome }).connect({ mnemonic: 'm' });
 
     const proxyCall = calls.find((c) => c.startsWith('proxy.set:'));
     const value = JSON.parse(proxyCall!.slice('proxy.set:'.length));
     expect(value.mode).toBe('fixed_servers');
-    expect(value.rules.singleProxy).toEqual({ scheme: 'socks5', host: '127.0.0.1', port: 1080 });
+    expect(value.rules.singleProxy).toEqual({ scheme: 'http', host: '127.0.0.1', port: 8118 });
     expect(value.rules.bypassList).toEqual(['localhost', '127.0.0.1']);
+  });
+
+  it('asks the host for its HTTP listener on Chromium, which cannot answer SOCKS5 auth', async () => {
+    const seen: HostRequest[] = [];
+    const { chrome } = fakeChrome((req, p) => {
+      seen.push(req);
+      healthyHost(req, p);
+    });
+    await new WarrenBrowserVpn({ chrome }).connect({ mnemonic: 'm', httpProxy: false });
+
+    expect(seen.find((r) => r.type === 'connect')).toMatchObject({ httpProxy: true });
+  });
+
+  it('refuses a host that hands over no credentials, before routing anything', async () => {
+    const { chrome, calls } = fakeChrome((req, p) => {
+      if (req.type === 'connect') {
+        p.emit({ id: req.id, ok: true, type: 'connect', endpoints: LISTENERS });
+      } else healthyHost(req, p);
+    });
+    const vpn = new WarrenBrowserVpn({ chrome });
+
+    const err = await vpn.connect({ mnemonic: 'm' }).catch((e) => e);
+
+    expect((err as WarrenExtensionError).code).toBe('protocol');
+    expect(calls.some((c) => c.startsWith('proxy.set'))).toBe(false);
+    expect(vpn.forListener(LISTENERS.http)).toBeUndefined();
+  });
+
+  it('refuses a Chromium connect whose host serves no HTTP listener', async () => {
+    const { chrome, calls } = fakeChrome((req, p) => {
+      if (req.type === 'connect') {
+        p.emit({
+          id: req.id,
+          ok: true,
+          type: 'connect',
+          endpoints: { socks5: LISTENERS.socks5 },
+          auth: AUTH,
+        });
+      } else healthyHost(req, p);
+    });
+
+    const err = await new WarrenBrowserVpn({ chrome }).connect({ mnemonic: 'm' }).catch((e) => e);
+
+    expect((err as WarrenExtensionError).code).toBe('protocol');
+    expect(calls.some((c) => c.startsWith('proxy.set'))).toBe(false);
+  });
+
+  it('hands the session credentials only for its own listeners, and only while the tunnel lives', async () => {
+    const { chrome, port } = fakeChrome(healthyHost);
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+
+    expect(vpn.forListener(LISTENERS.http)).toEqual(AUTH);
+    expect(vpn.forListener(LISTENERS.socks5)).toEqual(AUTH);
+    expect(vpn.forListener('127.0.0.1:9999')).toBeUndefined();
+
+    port.die();
+    expect(vpn.forListener(LISTENERS.http)).toBeUndefined();
+  });
+
+  it('forgets the session credentials on disconnect', async () => {
+    const { chrome } = fakeChrome(healthyHost);
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+
+    await vpn.disconnect();
+
+    expect(vpn.forListener(LISTENERS.http)).toBeUndefined();
   });
 
   it('never touches proxy settings when the host refuses the connect', async () => {
     const { chrome, calls } = fakeChrome((req, port) => {
       if (req.type === 'hello') {
-        port.emit({ id: req.id, ok: true, type: 'hello', protocol: 1, address: 'wbTest' });
+        port.emit({ id: req.id, ok: true, type: 'hello', protocol: EXTENSION_PROTOCOL_VERSION });
       } else {
         port.emit({ id: req.id, ok: false, code: 'api', message: 'subscription expired' });
       }
@@ -327,7 +398,7 @@ describe('WarrenBrowserVpn over a routing it already holds', () => {
     // to reconnect; that reopens the port without reviving the old tunnel.
     expect((await vpn.status()).state).toBe('disconnected');
 
-    await expect(vpn.connect({ mnemonic: 'm' })).resolves.toEqual({ socks5: '127.0.0.1:1080' });
+    await expect(vpn.connect({ mnemonic: 'm' })).resolves.toEqual(LISTENERS);
 
     expect(calls).not.toContain('proxy.clear');
     expect(vpn.isProxied()).toBe(true);
@@ -403,12 +474,15 @@ describe('WarrenBrowserVpn split tunneling', () => {
     await vpn.connect({ mnemonic: 'm', split: { mode: 'only', rules: ['work.example'] } });
 
     expect(handler).toBeDefined();
-    // Matched host -> SOCKS ProxyInfo; unmatched -> direct.
-    expect(handler!({ url: 'https://work.example/x' })).toMatchObject({
+    // Matched host -> SOCKS ProxyInfo carrying the session credentials;
+    // unmatched -> direct.
+    expect(handler!({ url: 'https://work.example/x' })).toEqual({
       type: 'socks',
       host: '127.0.0.1',
       port: 1080,
       proxyDNS: true,
+      username: 'warren',
+      password: 'session-secret',
     });
     expect(handler!({ url: 'https://personal.example/x' })).toEqual({ type: 'direct' });
 
@@ -446,7 +520,7 @@ describe('WarrenBrowserVpn Firefox only-mode handlers', () => {
 
     await expect(
       vpn.connect({ mnemonic: 'm', split: { mode: 'only', rules: ['work.example'] } }),
-    ).resolves.toEqual({ socks5: '127.0.0.1:1080' });
+    ).resolves.toEqual(LISTENERS);
     expect(handlers.size).toBe(1);
   });
 
@@ -454,12 +528,30 @@ describe('WarrenBrowserVpn Firefox only-mode handlers', () => {
     const { chrome, handlers, handlersAtSet } = firefoxWithHandlers();
     const vpn = new WarrenBrowserVpn({ chrome, platform: 'firefox' });
     await vpn.connect({ mnemonic: 'm', split: { mode: 'only', rules: ['work.example'] } });
+    const [onlyMode] = handlers;
 
     await vpn.applySplit({ mode: 'all', rules: [] });
 
     // The old handler still tunnelled work.example while the settings changed.
-    expect(handlersAtSet.at(-1)).toBe(1);
-    expect(handlers.size).toBe(0);
+    expect(handlersAtSet.at(-1)).toBe(2);
+    expect(handlers.size).toBe(1);
+    expect(handlers.has(onlyMode!)).toBe(false);
+  });
+
+  it('routes every mode through a handler carrying the session credentials', async () => {
+    const { chrome, handlers } = firefoxWithHandlers();
+    const vpn = new WarrenBrowserVpn({ chrome, platform: 'firefox' });
+    await vpn.connect({ mnemonic: 'm', split: { mode: 'bypass', rules: ['bank.example'] } });
+    const [handler] = handlers;
+
+    expect(handler!({ url: 'https://news.example/' })).toEqual({
+      type: 'socks',
+      host: '127.0.0.1',
+      port: 1080,
+      proxyDNS: true,
+      ...AUTH,
+    });
+    expect(handler!({ url: 'https://bank.example/' })).toEqual({ type: 'direct' });
   });
 
   it('leaves no handler behind after a reconnect over a dead host and a disconnect', async () => {
@@ -490,7 +582,7 @@ describe('WarrenBrowserVpn disconnect with a silent host', () => {
 
     expect(await stuck).toBe('host_unavailable');
     answer = true;
-    await expect(vpn.connect({ mnemonic: 'm' })).resolves.toEqual({ socks5: '127.0.0.1:1080' });
+    await expect(vpn.connect({ mnemonic: 'm' })).resolves.toEqual(LISTENERS);
   });
 
   it('restores direct routing even when the host never answers', async () => {
@@ -530,6 +622,7 @@ describe('WarrenBrowserVpn on Firefox', () => {
     base.chrome.extension = {
       isAllowedIncognitoAccess: () => Promise.resolve(options.incognitoAllowed ?? true),
     };
+    base.chrome.proxy.onRequest = { addListener: () => undefined, removeListener: () => undefined };
     return { ...base, values };
   }
 
@@ -546,6 +639,17 @@ describe('WarrenBrowserVpn on Firefox', () => {
       proxyDNS: true,
       passthrough: 'localhost, 127.0.0.1',
     });
+  });
+
+  it('refuses to route a Firefox whose requests it cannot authenticate one by one', async () => {
+    const { chrome, calls } = firefoxChrome(healthyHost);
+    chrome.proxy.onRequest = undefined;
+    const vpn = new WarrenBrowserVpn({ chrome, platform: 'firefox' });
+
+    const err = await vpn.connect({ mnemonic: 'm' }).catch((e) => e);
+
+    expect((err as WarrenExtensionError).code).toBe('proxy_uncontrollable');
+    expect(calls.some((c) => c.startsWith('proxy.set'))).toBe(false);
   });
 
   it('requires private-browsing access before touching proxy settings', async () => {

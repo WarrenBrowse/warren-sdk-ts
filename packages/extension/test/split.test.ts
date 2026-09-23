@@ -8,6 +8,7 @@ import {
 } from '../src/split.js';
 
 const SOCKS = '127.0.0.1:1080';
+const HTTP = '127.0.0.1:8118';
 
 describe('hostMatchesRule', () => {
   it('matches an exact host', () => {
@@ -61,18 +62,18 @@ describe('shouldTunnelHost', () => {
 });
 
 describe('buildChromiumProxyValue', () => {
-  it('all mode uses fixed_servers with the loopback bypass only', () => {
-    const value = buildChromiumProxyValue(SOCKS, { mode: 'all', rules: [] }) as {
+  it('all mode points fixed_servers at the HTTP listener with the loopback bypass only', () => {
+    const value = buildChromiumProxyValue(HTTP, { mode: 'all', rules: [] }) as {
       mode: string;
       rules: { singleProxy: unknown; bypassList: string[] };
     };
     expect(value.mode).toBe('fixed_servers');
-    expect(value.rules.singleProxy).toEqual({ scheme: 'socks5', host: '127.0.0.1', port: 1080 });
+    expect(value.rules.singleProxy).toEqual({ scheme: 'http', host: '127.0.0.1', port: 8118 });
     expect(value.rules.bypassList).toEqual(['localhost', '127.0.0.1']);
   });
 
   it('bypass mode appends the rules to the native bypassList', () => {
-    const value = buildChromiumProxyValue(SOCKS, {
+    const value = buildChromiumProxyValue(HTTP, {
       mode: 'bypass',
       rules: ['bank.example', '*.corp.example'],
     }) as { mode: string; rules: { bypassList: string[] } };
@@ -85,15 +86,16 @@ describe('buildChromiumProxyValue', () => {
     ]);
   });
 
-  it('only mode emits a PAC script routing matched hosts to the socks proxy', () => {
-    const value = buildChromiumProxyValue(SOCKS, { mode: 'only', rules: ['work.example'] }) as {
+  it('only mode emits a PAC script routing matched hosts to the HTTP listener', () => {
+    const value = buildChromiumProxyValue(HTTP, { mode: 'only', rules: ['work.example'] }) as {
       mode: string;
       pacScript: { data: string };
     };
     expect(value.mode).toBe('pac_script');
     const pac = value.pacScript.data;
     expect(pac).toContain('FindProxyForURL');
-    expect(pac).toContain('SOCKS5 127.0.0.1:1080');
+    expect(pac).toContain("'PROXY 127.0.0.1:8118'");
+    expect(pac).not.toContain('SOCKS');
     expect(pac).toContain('work.example');
     // Loopback must stay direct even inside the PAC.
     expect(pac).toContain('DIRECT');
