@@ -319,6 +319,58 @@ describe('WarrenBrowserVpn fail-closed behavior', () => {
     expect(states).toContain('failed');
   });
 
+  it('fails a connect whose host dies while the browser is being routed, off its port', async () => {
+    const { chrome, calls, port } = fakeChrome(healthyHost);
+    const set = chrome.proxy.settings.set.bind(chrome.proxy.settings);
+    chrome.proxy.settings.set = (details) => {
+      set(details);
+      port.die();
+    };
+    const vpn = new WarrenBrowserVpn({ chrome });
+
+    const err = await vpn.connect({ mnemonic: 'm' }).catch((e) => e);
+
+    expect((err as WarrenExtensionError).code).toBe('host_unavailable');
+    expect(calls.filter((c) => c.startsWith('proxy.')).at(-1)).toBe('proxy.clear');
+    expect(vpn.forListener(LISTENERS.http)).toBeUndefined();
+    expect(vpn.isProxied()).toBe(false);
+  });
+
+  it('never routes to, nor answers for, a host that died while the leaks were being closed', async () => {
+    const { chrome, calls, port } = fakeChrome(healthyHost);
+    const harden = chrome.privacy.network.webRTCIPHandlingPolicy.set.bind(
+      chrome.privacy.network.webRTCIPHandlingPolicy,
+    );
+    chrome.privacy.network.webRTCIPHandlingPolicy.set = (details) => {
+      harden(details);
+      port.die();
+    };
+    const vpn = new WarrenBrowserVpn({ chrome });
+
+    await vpn.connect({ mnemonic: 'm' }).catch(() => undefined);
+
+    expect(calls.some((c) => c.startsWith('proxy.set:') && c.includes('8118'))).toBe(false);
+    expect(vpn.forListener(LISTENERS.http)).toBeUndefined();
+  });
+
+  it('blocks nothing when its host dies after a disconnect that could not clear the proxy', async () => {
+    const { chrome, calls, port } = fakeChrome(healthyHost);
+    const vpn = new WarrenBrowserVpn({ chrome });
+    const lost = vi.fn();
+    vpn.onHostLost(lost);
+    await vpn.connect({ mnemonic: 'm' });
+    chrome.proxy.settings.clear = () => {
+      throw new Error('settings unavailable');
+    };
+    await vpn.disconnect().catch(() => undefined);
+    const after = calls.length;
+
+    port.die();
+
+    expect(calls.slice(after).filter((c) => c.startsWith('proxy.set:'))).toEqual([]);
+    expect(lost).not.toHaveBeenCalled();
+  });
+
   it('reports the loss of the host that carried the tunnel', async () => {
     const { chrome, port } = fakeChrome(healthyHost);
     const vpn = new WarrenBrowserVpn({ chrome });

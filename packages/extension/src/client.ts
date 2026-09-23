@@ -349,12 +349,16 @@ export class WarrenBrowserVpn {
       await hardenBrowserLeaks(this.chrome.privacy.network);
       hardened = true;
       const split = options.split ?? DEFAULT_SPLIT;
+      this.assertHostAlive();
       // Held before the browser is pointed at the listener, whose first
       // challenge can come as soon as the routing is set.
       this.endpoints = res.endpoints;
       this.auth = auth;
       await this.applyProxy(res.endpoints, split);
       await this.verifyRouting(split);
+      // A host that died meanwhile released the ports just routed to: the
+      // failure path puts back what the browser held before.
+      this.assertHostAlive();
       this.proxied = true;
       this.tunnelUp = true;
       if (heldHandler) this.chrome.proxy.onRequest?.removeListener(heldHandler);
@@ -368,6 +372,13 @@ export class WarrenBrowserVpn {
       throw error;
     } finally {
       this.connecting = false;
+    }
+  }
+
+  /** Throws when the host this connect is talking to has gone. */
+  private assertHostAlive(): void {
+    if (this.portDead) {
+      throw new WarrenExtensionError('host_unavailable', 'native messaging host disconnected');
     }
   }
 
@@ -500,11 +511,14 @@ export class WarrenBrowserVpn {
       }
       await this.clearBrowserSettings();
       this.proxied = false;
+    } finally {
+      // Even when the settings could not be cleared, the user asked for the
+      // tunnel to go: its host is released here, and its later death is not
+      // a lost host to block the browser for.
       this.tunnelUp = false;
       this.endpoints = undefined;
       this.auth = undefined;
       this.closePort();
-    } finally {
       this.releasing = false;
     }
   }
