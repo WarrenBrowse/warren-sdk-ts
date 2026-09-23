@@ -49,7 +49,17 @@ launch. Auto-lock and explicit lock wipe both.
   explicit `disconnect()`. If the host dies, the browser keeps pointing at the
   dead proxy: traffic blackholes instead of leaking around the tunnel. The host
   side mirrors this: browser gone (stdin EOF) means the tunnel dies with the
-  process.
+  process. A failed `connect()` leaves the browser as it found it: a routing
+  this extension already held (a lockdown, or a tunnel whose host died) is put
+  back rather than cleared, and `connect()` over a dead tunnel reconnects in
+  place. `applySplit()` changes the rules of a live tunnel without tearing it
+  down, so a rule edit never opens a direct window.
+- **Lockdown.** A `LockdownState` saved to the routing store and installed with
+  `installChromiumRouting` (or answered by `attachFirefoxRouting`) holds the
+  browser blocked while its user wants protection and no tier carries it: every
+  request stalls except loopback and the exempt hosts, which should be exactly
+  what reconnecting needs (the Warren API). Keep the store in
+  `chrome.storage.local` so the hold survives a browser restart and an update.
 - **Supply chain is the real risk** (per the 2025 wallet-extension breaches):
   the vault crypto is table stakes; protect the release pipeline (hardware-backed
   store keys, pinned/audited deps, signed commits, mandatory pre-publish review,

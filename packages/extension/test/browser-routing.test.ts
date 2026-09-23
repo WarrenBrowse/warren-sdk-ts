@@ -2,16 +2,20 @@ import { describe, expect, it } from 'vitest';
 import {
   FAIL_CLOSED_PROXY,
   type IngressEndpoint,
+  type LockdownState,
   type RoutingState,
   type RoutingStore,
   attachChromiumProxyAuth,
   attachFirefoxRouting,
   buildChromiumIngressValue,
+  buildChromiumLockdownValue,
   clearChromiumRouting,
   firefoxProxyInfoFor,
+  hardenBrowserLeaks,
   installChromiumRouting,
   memoryRoutingStore,
   readChromiumRouting,
+  releaseBrowserLeaks,
   routingStoreOver,
 } from '../src/index.js';
 
@@ -29,6 +33,11 @@ const STATE: RoutingState = {
   exit: { country: 'DE', city: 'Falkenstein' },
   hops: 1,
   installedAt: 1000,
+};
+const LOCKDOWN: LockdownState = {
+  tier: 'lockdown',
+  exempt: ['api.example.com'],
+  installedAt: 2000,
 };
 const CREDENTIAL = 'a-base64url-credential';
 const provider = { current: async () => CREDENTIAL };
@@ -102,7 +111,7 @@ describe('installChromiumRouting / readChromiumRouting / clearChromiumRouting', 
     await installChromiumRouting(settings, STATE);
     expect(rec.calls).toContain('set:regular');
     const read = await readChromiumRouting(settings, HTTPS.host);
-    expect(read).toEqual({ controlled: true, ours: true, host: HTTPS.host });
+    expect(read).toEqual({ controlled: true, ours: true, lockdown: false, host: HTTPS.host });
   });
 
   it('refuses to install over settings another extension controls', async () => {
@@ -117,7 +126,7 @@ describe('installChromiumRouting / readChromiumRouting / clearChromiumRouting', 
     const { settings } = fakeSettings();
     await installChromiumRouting(settings, STATE);
     const read = await readChromiumRouting(settings, 'nl1.edge.example.net');
-    expect(read).toEqual({ controlled: true, ours: false, host: HTTPS.host });
+    expect(read).toEqual({ controlled: true, ours: false, lockdown: false, host: HTTPS.host });
   });
 
   it('clears the settings and reads back as released', async () => {
@@ -127,6 +136,7 @@ describe('installChromiumRouting / readChromiumRouting / clearChromiumRouting', 
     expect(await readChromiumRouting(settings, HTTPS.host)).toEqual({
       controlled: false,
       ours: false,
+      lockdown: false,
     });
   });
 
@@ -137,6 +147,83 @@ describe('installChromiumRouting / readChromiumRouting / clearChromiumRouting', 
       split: { mode: 'only', rules: ['bank.example'] },
     });
     expect((await readChromiumRouting(settings, HTTPS.host)).ours).toBe(true);
+  });
+});
+
+describe('lockdown on Chromium', () => {
+  it('points the browser at a proxy that cannot answer, reaching directly only loopback and the exempt hosts', () => {
+    expect(buildChromiumLockdownValue(['api.example.com'])).toEqual({
+      mode: 'fixed_servers',
+      rules: {
+        singleProxy: { scheme: 'https', host: '127.0.0.1', port: 1 },
+        bypassList: ['localhost', '127.0.0.1', 'api.example.com'],
+      },
+    });
+  });
+
+  it('installs a lockdown record over a live routing with a set, never a clear', async () => {
+    const { settings, rec } = fakeSettings();
+    await installChromiumRouting(settings, STATE);
+    await installChromiumRouting(settings, LOCKDOWN);
+    expect(rec.calls).not.toContain('clear');
+    expect(rec.value).toEqual(buildChromiumLockdownValue(LOCKDOWN.exempt));
+    expect(rec.level).toBe('controlled_by_this_extension');
+  });
+
+  it('reads its own lockdown back as a lockdown, and an ingress as not one', async () => {
+    const { settings } = fakeSettings();
+    await installChromiumRouting(settings, LOCKDOWN);
+    expect(await readChromiumRouting(settings, HTTPS.host)).toMatchObject({
+      controlled: true,
+      ours: false,
+      lockdown: true,
+    });
+    await installChromiumRouting(settings, STATE);
+    expect(await readChromiumRouting(settings, HTTPS.host)).toMatchObject({
+      ours: true,
+      lockdown: false,
+    });
+  });
+
+  it('refuses to install a lockdown over settings another extension controls', async () => {
+    const { settings, rec } = fakeSettings('controlled_by_other_extensions');
+    await expect(installChromiumRouting(settings, LOCKDOWN)).rejects.toMatchObject({
+      code: 'proxy_uncontrollable',
+    });
+    expect(rec.calls).not.toContain('set:regular');
+  });
+});
+
+describe('leak hardening', () => {
+  function fakeNetwork() {
+    const calls: string[] = [];
+    const setting = (name: string) => ({
+      set: async (d: { value: unknown }) => {
+        calls.push(`${name}.set:${String(d.value)}`);
+      },
+      clear: async () => {
+        calls.push(`${name}.clear`);
+      },
+    });
+    return {
+      calls,
+      network: {
+        webRTCIPHandlingPolicy: setting('webrtc'),
+        networkPredictionEnabled: setting('prediction'),
+      },
+    };
+  }
+
+  it('keeps WebRTC off non-proxied UDP and turns the DNS prefetcher off', async () => {
+    const { network, calls } = fakeNetwork();
+    await hardenBrowserLeaks(network);
+    expect(calls).toEqual(['webrtc.set:disable_non_proxied_udp', 'prediction.set:false']);
+  });
+
+  it('hands both settings back to the browser on release', async () => {
+    const { network, calls } = fakeNetwork();
+    await releaseBrowserLeaks(network);
+    expect(calls).toEqual(['webrtc.clear', 'prediction.clear']);
   });
 });
 
@@ -303,6 +390,49 @@ describe('attachFirefoxRouting', () => {
   });
 });
 
+describe('attachFirefoxRouting under a lockdown', () => {
+  function listen(store: RoutingStore) {
+    let listener: ((r: { url: string }) => unknown) | undefined;
+    attachFirefoxRouting(
+      {
+        onRequest: {
+          addListener: (l) => {
+            listener = l;
+          },
+        },
+      },
+      store,
+      provider,
+    );
+    return (url: string) => listener?.({ url });
+  }
+
+  it('stalls every browsing request, with no credential offered to anyone', async () => {
+    const store = memoryRoutingStore();
+    await store.save(LOCKDOWN);
+    const route = listen(store);
+    expect(await route('https://example.com/')).toEqual(FAIL_CLOSED_PROXY);
+    expect(await route('http://example.org/path')).toEqual(FAIL_CLOSED_PROXY);
+  });
+
+  it('lets exactly the exempt hosts and loopback through, so reconnecting stays possible', async () => {
+    const store = memoryRoutingStore();
+    await store.save(LOCKDOWN);
+    const route = listen(store);
+    expect(await route('https://api.example.com/v1/tokens')).toEqual({ type: 'direct' });
+    expect(await route('https://API.example.com/')).toEqual({ type: 'direct' });
+    expect(await route('http://localhost:3000/')).toEqual({ type: 'direct' });
+    expect(await route('https://evil.api.example.com/')).toEqual(FAIL_CLOSED_PROXY);
+    expect(await route('https://api.example.com.evil.net/')).toEqual(FAIL_CLOSED_PROXY);
+  });
+
+  it('stalls a request whose URL it cannot parse while routed', async () => {
+    const store = memoryRoutingStore();
+    await store.save(STATE);
+    expect(await listen(store)('not a url')).toEqual(FAIL_CLOSED_PROXY);
+  });
+});
+
 describe('routingStoreOver', () => {
   it('round-trips the state through a chrome.storage-shaped area', async () => {
     const items = new Map<string, unknown>();
@@ -319,6 +449,23 @@ describe('routingStoreOver', () => {
     await store.save(STATE);
     expect(await store.load()).toEqual(STATE);
     await store.clear();
+    expect(await store.load()).toBeUndefined();
+  });
+
+  it('round-trips a lockdown and refuses one whose exempt list is not a list of hosts', async () => {
+    const items = new Map<string, unknown>();
+    const store = routingStoreOver({
+      get: async (key) => (items.has(key) ? { [key]: items.get(key) } : {}),
+      set: async (entries) => {
+        for (const [k, v] of Object.entries(entries)) items.set(k, v);
+      },
+      remove: async (key) => {
+        items.delete(key);
+      },
+    });
+    await store.save(LOCKDOWN);
+    expect(await store.load()).toEqual(LOCKDOWN);
+    items.set('warren.routing', { tier: 'lockdown', exempt: 'api.example.com', installedAt: 1 });
     expect(await store.load()).toBeUndefined();
   });
 

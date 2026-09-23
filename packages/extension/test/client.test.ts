@@ -10,7 +10,7 @@ import type { HostRequest } from '../src/protocol.js';
 /** A scripted fake of the chrome extension API surface the client uses. */
 function fakeChrome(
   script: (req: HostRequest, port: FakePort) => void,
-  options: { control?: string[] } = {},
+  options: { control?: string[]; value?: unknown } = {},
 ) {
   const calls: string[] = [];
   const port = new FakePort(script);
@@ -28,7 +28,7 @@ function fakeChrome(
           calls.push('proxy.get');
           const level = control[Math.min(gets, control.length - 1)];
           gets += 1;
-          return { levelOfControl: level };
+          return { levelOfControl: level, value: options.value };
         },
         set: (details) => {
           calls.push(`proxy.set:${JSON.stringify(details.value)}`);
@@ -264,6 +264,99 @@ describe('WarrenBrowserVpn fail-closed behavior', () => {
     await vpn.disconnect();
 
     expect(calls).toContain('proxy.clear');
+  });
+});
+
+describe('WarrenBrowserVpn over a routing it already holds', () => {
+  const HELD = {
+    mode: 'fixed_servers',
+    rules: { singleProxy: { scheme: 'https', host: '127.0.0.1', port: 1 }, bypassList: [] },
+  };
+
+  it('puts the held routing back when the connect fails, never restoring direct', async () => {
+    const { chrome, calls } = fakeChrome(healthyHost, {
+      control: ['controlled_by_this_extension', 'controlled_by_other_extensions'],
+      value: HELD,
+    });
+    const vpn = new WarrenBrowserVpn({ chrome });
+
+    const err = await vpn.connect({ mnemonic: 'm' }).catch((e) => e);
+
+    expect((err as WarrenExtensionError).code).toBe('proxy_uncontrollable');
+    expect(calls).not.toContain('proxy.clear');
+    expect(calls.filter((c) => c.startsWith('proxy.set:')).at(-1)).toBe(
+      `proxy.set:${JSON.stringify(HELD)}`,
+    );
+    // The held routing was hardened when it was installed; unhardening it now
+    // would reopen the WebRTC leak under a blocked browser.
+    expect(calls).not.toContain('webrtc.clear');
+    expect(calls).not.toContain('prediction.clear');
+  });
+
+  it('keeps leak hardening this extension already held when a connect fails', async () => {
+    // Firefox holds its lockdown in a proxy.onRequest listener, so the proxy
+    // setting is not ours while the WebRTC policy is.
+    const { chrome, calls } = fakeChrome(healthyHost, {
+      control: ['controllable_by_this_extension', 'controlled_by_other_extensions'],
+    });
+    chrome.privacy.network.webRTCIPHandlingPolicy.get = () => ({
+      levelOfControl: 'controlled_by_this_extension',
+      value: 'disable_non_proxied_udp',
+    });
+
+    await new WarrenBrowserVpn({ chrome }).connect({ mnemonic: 'm' }).catch(() => undefined);
+
+    expect(calls).not.toContain('webrtc.clear');
+    expect(calls).not.toContain('prediction.clear');
+  });
+
+  it('reconnects over a tunnel whose host died, the browser routed throughout', async () => {
+    const { chrome, calls, port } = fakeChrome(
+      (req, p) => {
+        healthyHost(req, p);
+        if (req.type === 'status') {
+          p.emit({ id: req.id, ok: true, type: 'status', state: 'disconnected' });
+        }
+      },
+      { control: ['controlled_by_this_extension'] },
+    );
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+    port.die();
+    // The popup asks the freshly spawned host for its state before offering
+    // to reconnect; that reopens the port without reviving the old tunnel.
+    expect((await vpn.status()).state).toBe('disconnected');
+
+    await expect(vpn.connect({ mnemonic: 'm' })).resolves.toEqual({ socks5: '127.0.0.1:1080' });
+
+    expect(calls).not.toContain('proxy.clear');
+    expect(vpn.isProxied()).toBe(true);
+  });
+
+  it('applies new split rules in place, with no teardown and no direct window', async () => {
+    const seen: HostRequest[] = [];
+    const { chrome, calls } = fakeChrome((req, p) => {
+      seen.push(req);
+      healthyHost(req, p);
+    });
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+
+    await vpn.applySplit({ mode: 'bypass', rules: ['bank.example'] });
+
+    const last = calls.filter((c) => c.startsWith('proxy.set:')).at(-1);
+    const value = JSON.parse(last!.slice('proxy.set:'.length));
+    expect(value.rules.bypassList).toContain('bank.example');
+    expect(calls).not.toContain('proxy.clear');
+    expect(seen.map((r) => r.type)).not.toContain('disconnect');
+  });
+
+  it('refuses to apply split rules with no tunnel to route through', async () => {
+    const { chrome } = fakeChrome(healthyHost);
+    const err = await new WarrenBrowserVpn({ chrome })
+      .applySplit({ mode: 'all', rules: [] })
+      .catch((e) => e);
+    expect((err as WarrenExtensionError).code).toBe('not_connected');
   });
 });
 

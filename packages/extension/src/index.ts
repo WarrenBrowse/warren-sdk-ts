@@ -61,6 +61,7 @@ export {
   attachChromiumProxyAuth,
   attachFirefoxRouting,
   buildChromiumIngressValue,
+  buildChromiumLockdownValue,
   clearChromiumRouting,
   firefoxProxyInfoFor,
   installChromiumRouting,
@@ -71,12 +72,20 @@ export {
   type FirefoxProxyInfo,
   type FirefoxProxyLike,
   type IngressEndpoint,
+  type LockdownState,
   type ProxySettingsLike,
+  type RoutingRecord,
   type RoutingState,
   type RoutingStorageArea,
   type RoutingStore,
   type WebRequestLike,
 } from './browser-routing.js';
+export {
+  hardenBrowserLeaks,
+  releaseBrowserLeaks,
+  type BrowserSettingLike,
+  type PrivacyNetworkLike,
+} from './leaks.js';
 export {
   BROWSER_PROXY_BUNDLE_KEY,
   TOKEN_BUNDLE_KEY,

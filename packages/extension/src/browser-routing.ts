@@ -34,6 +34,14 @@
  * A missing credential, a dead ingress or an unreadable store leaves the browser
  * routed and stalling, never falling back to a direct, unprotected route. Only
  * an explicit disconnect restores direct routing.
+ *
+ * # Lockdown
+ *
+ * A {@link LockdownState} is the routing a browser holds while its user wants
+ * protection and no tier carries it yet (the browser restarted, the wallet is
+ * locked, the hour's credential is missing). It stalls every request except the
+ * few hosts reconnecting needs, and it persists like any other routing, so a
+ * restart or an extension update never opens a direct window.
  */
 
 import { base64urlnopad } from '@scure/base';
@@ -90,16 +98,35 @@ export interface RoutingState {
   readonly installedAt: number;
 }
 
+/**
+ * The routing held while protection is wanted and no tier carries the browser.
+ * Every request stalls except loopback and {@link exempt}, which is exactly
+ * what reconnecting needs (the Warren API the background signs against) and
+ * never a destination the user browses.
+ */
+export interface LockdownState {
+  readonly tier: 'lockdown';
+  /** Hostnames that stay reachable directly, matched exactly. */
+  readonly exempt: readonly string[];
+  /** Unix ms the lockdown was installed, for diagnostics. */
+  readonly installedAt: number;
+}
+
+/** Whatever the browser is told to do, persisted across worker teardowns,
+ * browser restarts and extension updates. */
+export type RoutingRecord = RoutingState | LockdownState;
+
 /** Yields the credential to present right now, or `undefined` when the store
  * holds none for this epoch. Async because minting and epoch bookkeeping are. */
 export interface CredentialProvider {
   current(): Promise<string | undefined>;
 }
 
-/** Persists the {@link RoutingState} across service-worker teardowns. */
+/** Persists the {@link RoutingRecord} across service-worker teardowns. Backed
+ * by durable storage, it also survives a browser restart and an update. */
 export interface RoutingStore {
-  load(): Promise<RoutingState | undefined>;
-  save(state: RoutingState): Promise<void>;
+  load(): Promise<RoutingRecord | undefined>;
+  save(record: RoutingRecord): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -152,6 +179,10 @@ export interface FirefoxProxyInfo {
 export const FAIL_CLOSED_PROXY: FirefoxProxyInfo[] = [
   { type: 'https', host: '127.0.0.1', port: 1 },
 ];
+
+/** Where a lockdown points the browser: loopback port 1, which nothing listens
+ * on, so a request fails at once instead of waiting on a timeout. */
+const LOCKDOWN_PROXY = { scheme: 'https', host: '127.0.0.1', port: 1 } as const;
 
 const ROUTING_KEY = 'warren.routing';
 
@@ -227,6 +258,40 @@ function buildIngressPac(host: string, port: number, split: SplitTunnelConfig): 
 }`;
 }
 
+/**
+ * The `chrome.proxy.settings` value of a lockdown: every request goes to a
+ * proxy that cannot answer, except loopback and the exempt hosts. A
+ * `fixed_servers` list holds no `DIRECT` fallback, so a refused proxy stalls
+ * the request rather than sending it around the proxy.
+ */
+export function buildChromiumLockdownValue(exempt: readonly string[]): unknown {
+  return {
+    mode: 'fixed_servers',
+    rules: { singleProxy: { ...LOCKDOWN_PROXY }, bypassList: [...LOOPBACK_BYPASS, ...exempt] },
+  };
+}
+
+function isLockdownValue(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null) return false;
+  const v = value as {
+    mode?: string;
+    rules?: { singleProxy?: { scheme?: string; host?: string; port?: number } };
+  };
+  const proxy = v.rules?.singleProxy;
+  return (
+    v.mode === 'fixed_servers' &&
+    proxy?.scheme === LOCKDOWN_PROXY.scheme &&
+    proxy.host === LOCKDOWN_PROXY.host &&
+    proxy.port === LOCKDOWN_PROXY.port
+  );
+}
+
+function chromiumValueOf(record: RoutingRecord): unknown {
+  return record.tier === 'lockdown'
+    ? buildChromiumLockdownValue(record.exempt)
+    : buildChromiumIngressValue(record.endpoint, record.split);
+}
+
 /** Whether the browser can dial this URL's host through a proxy, given SNI
  * needs a real name. IP-literal and non-http URLs are left to the browser. */
 function ingressHostFromValue(value: unknown): string | undefined {
@@ -254,7 +319,7 @@ function ingressHostFromValue(value: unknown): string | undefined {
  */
 export async function installChromiumRouting(
   settings: ProxySettingsLike,
-  state: RoutingState,
+  record: RoutingRecord,
 ): Promise<void> {
   const before = await settings.get({});
   if (!controllable(before.levelOfControl)) {
@@ -263,10 +328,7 @@ export async function installChromiumRouting(
       'proxy settings are controlled elsewhere (another extension or enterprise policy)',
     );
   }
-  await settings.set({
-    value: buildChromiumIngressValue(state.endpoint, state.split),
-    scope: 'regular',
-  });
+  await settings.set({ value: chromiumValueOf(record), scope: 'regular' });
   const after = await settings.get({});
   if (after.levelOfControl !== 'controlled_by_this_extension') {
     throw new WarrenExtensionError(
@@ -276,17 +338,24 @@ export async function installChromiumRouting(
   }
 }
 
-/** Reads Chromium's live proxy settings: whether an extension controls them,
- * and whether the controlling proxy is our ingress at `expectedHost`. The
- * browser's own answer, the ground truth a torn-down worker has forgotten. */
+/** Reads Chromium's live proxy settings: whether this extension controls them,
+ * whether the controlling proxy is our ingress at `expectedHost`, and whether
+ * it is our lockdown. The browser's own answer, the ground truth a torn-down
+ * worker has forgotten. */
 export async function readChromiumRouting(
   settings: ProxySettingsLike,
   expectedHost: string,
-): Promise<{ controlled: boolean; ours: boolean; host?: string }> {
+): Promise<{ controlled: boolean; ours: boolean; lockdown: boolean; host?: string }> {
   const details = await settings.get({});
   const controlled = details.levelOfControl === 'controlled_by_this_extension';
-  const host = ingressHostFromValue(details.value);
-  return { controlled, ours: controlled && host === expectedHost, ...(host ? { host } : {}) };
+  const lockdown = controlled && isLockdownValue(details.value);
+  const host = lockdown ? undefined : ingressHostFromValue(details.value);
+  return {
+    controlled,
+    ours: controlled && host === expectedHost,
+    lockdown,
+    ...(host ? { host } : {}),
+  };
 }
 
 /** Restores direct routing. Only an explicit disconnect calls this. */
@@ -379,11 +448,16 @@ export function firefoxProxyInfoFor(
 
 /**
  * Registers the Firefox `proxy.onRequest` listener. It reloads the persisted
- * {@link RoutingState} on every request, so it is correct immediately after a
- * service-worker teardown with no in-memory state, and it decides per request
- * (loopback and bypassed sites go direct, everything else through the ingress).
- * If its own store cannot be read it fails closed ({@link FAIL_CLOSED_PROXY})
- * rather than leaking to a direct route.
+ * {@link RoutingRecord} on every request, so it is correct immediately after a
+ * service-worker teardown or a browser restart with no in-memory state, and it
+ * decides per request (loopback and bypassed sites go direct, everything else
+ * through the ingress, or nowhere under a lockdown). If its own store cannot be
+ * read it fails closed ({@link FAIL_CLOSED_PROXY}) rather than leaking to a
+ * direct route.
+ *
+ * Firefox answers `direct` with the browser's own proxy settings when some are
+ * set, so `direct` here means "not through the ingress", which leaves a local
+ * tunnel installed through `proxy.settings` in charge.
  */
 export function attachFirefoxRouting(
   proxy: FirefoxProxyLike,
@@ -393,7 +467,7 @@ export function attachFirefoxRouting(
   proxy.onRequest.addListener(
     async (request) => {
       if (isLoopbackUrl(request.url)) return { type: 'direct' };
-      let state: RoutingState | undefined;
+      let state: RoutingRecord | undefined;
       try {
         state = await store.load();
       } catch {
@@ -404,9 +478,14 @@ export function attachFirefoxRouting(
       if (!state) return { type: 'direct' };
       let host: string;
       try {
-        host = new URL(request.url).hostname;
+        host = new URL(request.url).hostname.toLowerCase();
       } catch {
-        return { type: 'direct' };
+        return FAIL_CLOSED_PROXY;
+      }
+      if (state.tier === 'lockdown') {
+        return state.exempt.some((h) => h.toLowerCase() === host)
+          ? { type: 'direct' }
+          : FAIL_CLOSED_PROXY;
       }
       if (!shouldTunnelHost(host, state.split)) return { type: 'direct' };
       const credential = await credentials.current();
@@ -416,10 +495,11 @@ export function attachFirefoxRouting(
   );
 }
 
-/** Validates a stored value as a {@link RoutingState}; a corrupt store yields
+/** Validates a stored value as a {@link RoutingRecord}; a corrupt store yields
  * `undefined` so the extension never routes on garbage. */
-function asRoutingState(value: unknown): RoutingState | undefined {
+function asRoutingRecord(value: unknown): RoutingRecord | undefined {
   if (typeof value !== 'object' || value === null) return undefined;
+  if ((value as { tier?: unknown }).tier === 'lockdown') return asLockdownState(value);
   const v = value as Partial<RoutingState>;
   const e = v.endpoint as IngressEndpoint | undefined;
   if (v.tier !== 'ingress' || !e || (e.kind !== 'https' && e.kind !== 'masque')) return undefined;
@@ -433,15 +513,22 @@ function asRoutingState(value: unknown): RoutingState | undefined {
   return v as RoutingState;
 }
 
+function asLockdownState(value: object): LockdownState | undefined {
+  const v = value as Partial<LockdownState>;
+  if (!Array.isArray(v.exempt) || !v.exempt.every((h) => typeof h === 'string')) return undefined;
+  if (typeof v.installedAt !== 'number') return undefined;
+  return v as LockdownState;
+}
+
 /** A {@link RoutingStore} over a `chrome.storage`-shaped area. */
 export function routingStoreOver(area: RoutingStorageArea): RoutingStore {
   return {
     async load() {
       const got = await area.get(ROUTING_KEY);
-      return asRoutingState(got[ROUTING_KEY]);
+      return asRoutingRecord(got[ROUTING_KEY]);
     },
-    async save(state) {
-      await area.set({ [ROUTING_KEY]: state });
+    async save(record) {
+      await area.set({ [ROUTING_KEY]: record });
     },
     async clear() {
       await area.remove(ROUTING_KEY);
@@ -451,7 +538,7 @@ export function routingStoreOver(area: RoutingStorageArea): RoutingStore {
 
 /** An in-memory {@link RoutingStore} for tests. */
 export function memoryRoutingStore(): RoutingStore {
-  let state: RoutingState | undefined;
+  let state: RoutingRecord | undefined;
   return {
     load: async () => state,
     save: async (s) => {

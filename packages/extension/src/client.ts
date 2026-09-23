@@ -1,3 +1,4 @@
+import { hardenBrowserLeaks, releaseBrowserLeaks } from './leaks.js';
 import {
   DEFAULT_HOST_NAME,
   EXTENSION_PROTOCOL_VERSION,
@@ -80,6 +81,12 @@ export interface ChromeLike {
   };
 }
 
+/** What `proxy.settings.get` answers: the effective value and who controls it. */
+interface ProxySettingDetails {
+  value?: unknown;
+  levelOfControl?: string;
+}
+
 /** The browser family, driving the proxy-settings dialect. */
 export type ExtensionPlatform = 'chromium' | 'firefox';
 
@@ -142,7 +149,9 @@ function globalChrome(): ChromeLike {
  * Fail-closed policy: once connected, the proxy settings are only ever removed
  * by an explicit {@link disconnect}. If the host dies, the browser keeps
  * pointing at the dead proxy (traffic blackholes, it does not leak around the
- * tunnel) and `onState('failed')` fires.
+ * tunnel) and `onState('failed')` fires. A failed connect leaves the browser as
+ * it found it: a routing this extension already held (a lockdown, or a tunnel
+ * whose host died) is put back, never replaced by a direct route.
  *
  * Requires manifest permissions: `proxy`, `privacy`, `nativeMessaging`.
  */
@@ -154,6 +163,11 @@ export class WarrenBrowserVpn {
   private port: NativePort | undefined;
   private portDead = false;
   private proxied = false;
+  /** Whether the host that built the current tunnel is still attached. A dead
+   * host takes its tunnel with it, while {@link proxied} keeps the browser
+   * pointed at the corpse (fail-closed). */
+  private tunnelUp = false;
+  private endpoints: ExtensionEndpoints | undefined;
   private connecting = false;
   private nextId = 1;
   private onRequestHandler: ((request: { url: string }) => unknown) | undefined;
@@ -197,17 +211,22 @@ export class WarrenBrowserVpn {
    */
   async connect(options: BrowserVpnConnectOptions): Promise<ExtensionEndpoints> {
     if (this.connecting) throw new WarrenExtensionError('already_connected', 'connect in flight');
-    if (this.proxied) throw new WarrenExtensionError('already_connected', 'already connected');
+    // A tunnel whose host died is gone: reconnecting over its held routing is
+    // how the browser gets back, so only a live tunnel refuses a second connect.
+    if (this.tunnelUp) throw new WarrenExtensionError('already_connected', 'already connected');
     this.connecting = true;
     let hardened = false;
+    let before: ProxySettingDetails | undefined;
+    let leaksHeld = false;
     try {
       // Fail early: a set() while another extension controls the proxy would
       // silently do nothing, leaving a live tunnel with no browser routed
       // through it. Most-recently-installed extension wins in Chromium.
-      await this.assertProxyControl([
+      before = await this.assertProxyControl([
         'controllable_by_this_extension',
         'controlled_by_this_extension',
       ]);
+      leaksHeld = await this.holdsLeakHardening();
       if (this.platform === 'firefox') {
         // Firefox rejects proxy.settings.set without private-browsing access,
         // which only the user can grant; surface it before dialing.
@@ -237,18 +256,17 @@ export class WarrenBrowserVpn {
       // Leak hardening BEFORE routing: WebRTC UDP candidates and the DNS
       // prefetcher (which resolves locally even under SOCKS5) must be off
       // before any traffic follows the proxy.
-      await this.chrome.privacy.network.webRTCIPHandlingPolicy.set({
-        value: 'disable_non_proxied_udp',
-      });
-      await this.chrome.privacy.network.networkPredictionEnabled?.set({ value: false });
+      await hardenBrowserLeaks(this.chrome.privacy.network);
       hardened = true;
       await this.applyProxy(res.endpoints, options.split ?? DEFAULT_SPLIT);
       // A set() that did not take control is a silent no-op: verify.
       await this.assertProxyControl(['controlled_by_this_extension']);
       this.proxied = true;
+      this.tunnelUp = true;
+      this.endpoints = res.endpoints;
       return res.endpoints;
     } catch (error) {
-      if (hardened) await this.clearBrowserSettings().catch(() => undefined);
+      if (hardened) await this.restoreBrowserSettings(before, leaksHeld).catch(() => undefined);
       this.closePort();
       throw error;
     } finally {
@@ -256,10 +274,29 @@ export class WarrenBrowserVpn {
     }
   }
 
-  private async assertProxyControl(acceptable: readonly string[]): Promise<void> {
+  /**
+   * Re-applies the browser routing with new split rules over the live tunnel.
+   * The rules live in the browser, not the host, so nothing is torn down and
+   * the browser never goes direct in between.
+   *
+   * @throws {WarrenExtensionError} `not_connected` with no live tunnel, and
+   * `proxy_uncontrollable` when the new settings did not take.
+   */
+  async applySplit(split: SplitTunnelConfig): Promise<void> {
+    if (!this.tunnelUp || !this.endpoints) {
+      throw new WarrenExtensionError('not_connected', 'no live tunnel to route through');
+    }
+    this.removeOnRequestHandler();
+    await this.applyProxy(this.endpoints, split);
+    await this.assertProxyControl(['controlled_by_this_extension']);
+  }
+
+  private async assertProxyControl(
+    acceptable: readonly string[],
+  ): Promise<ProxySettingDetails | undefined> {
     const get = this.chrome.proxy.settings.get?.bind(this.chrome.proxy.settings);
-    if (!get) return;
-    const details = (await get({})) as { levelOfControl?: string } | undefined;
+    if (!get) return undefined;
+    const details = (await get({})) as ProxySettingDetails | undefined;
     const level = details?.levelOfControl;
     if (level !== undefined && !acceptable.includes(level)) {
       throw new WarrenExtensionError(
@@ -267,16 +304,46 @@ export class WarrenBrowserVpn {
         'proxy settings are controlled elsewhere (another extension or enterprise policy)',
       );
     }
+    return details;
   }
 
-  private async clearBrowserSettings(): Promise<void> {
+  /** Whether the WebRTC leak setting is already this extension's (a lockdown
+   * or a tunnel whose host died holds it), which a failed connect keeps. */
+  private async holdsLeakHardening(): Promise<boolean> {
+    const setting = this.chrome.privacy.network.webRTCIPHandlingPolicy;
+    const details = (await setting.get?.({})) as ProxySettingDetails | undefined;
+    return details?.levelOfControl === 'controlled_by_this_extension';
+  }
+
+  /** Undoes a failed connect. What this extension held before (a routing, the
+   * leak hardening) is put back as it was; the rest goes back to the browser's
+   * defaults, as nothing of ours was protecting it. */
+  private async restoreBrowserSettings(
+    before: ProxySettingDetails | undefined,
+    leaksHeld: boolean,
+  ): Promise<void> {
+    this.removeOnRequestHandler();
+    if (before?.levelOfControl === 'controlled_by_this_extension') {
+      await this.chrome.proxy.settings.set({ value: before.value });
+    } else {
+      await this.chrome.proxy.settings.clear({});
+    }
+    if (!leaksHeld && before?.levelOfControl !== 'controlled_by_this_extension') {
+      await releaseBrowserLeaks(this.chrome.privacy.network);
+    }
+  }
+
+  private removeOnRequestHandler(): void {
     if (this.onRequestHandler) {
       this.chrome.proxy.onRequest?.removeListener(this.onRequestHandler);
       this.onRequestHandler = undefined;
     }
+  }
+
+  private async clearBrowserSettings(): Promise<void> {
+    this.removeOnRequestHandler();
     await this.chrome.proxy.settings.clear({});
-    await this.chrome.privacy.network.webRTCIPHandlingPolicy.clear({});
-    await this.chrome.privacy.network.networkPredictionEnabled?.clear({});
+    await releaseBrowserLeaks(this.chrome.privacy.network);
   }
 
   /** Asks the host for the current tunnel state. */
@@ -319,6 +386,8 @@ export class WarrenBrowserVpn {
     }
     await this.clearBrowserSettings();
     this.proxied = false;
+    this.tunnelUp = false;
+    this.endpoints = undefined;
     this.closePort();
   }
 
@@ -379,6 +448,7 @@ export class WarrenBrowserVpn {
     port.onMessage.addListener((raw) => this.onMessage(raw));
     port.onDisconnect.addListener(() => {
       this.portDead = true;
+      this.tunnelUp = false;
       const wasProxied = this.proxied;
       for (const [, waiter] of this.pending) {
         waiter.reject(
