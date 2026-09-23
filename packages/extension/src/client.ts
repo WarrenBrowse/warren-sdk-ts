@@ -130,6 +130,25 @@ export interface BrowserVpnConnectOptions {
   daita?: boolean;
 }
 
+/** How long an explicit disconnect waits for the host to acknowledge. */
+const HOST_DISCONNECT_TIMEOUT_MS = 3000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('timed out')), ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
 function globalChrome(): ChromeLike {
   const c = (globalThis as { chrome?: ChromeLike }).chrome;
   if (!c) {
@@ -218,6 +237,10 @@ export class WarrenBrowserVpn {
     let hardened = false;
     let before: ProxySettingDetails | undefined;
     let leaksHeld = false;
+    // A handler of a tunnel whose host died is part of the routing held until
+    // the new one is in place: removed on success, kept on failure.
+    const heldHandler = this.onRequestHandler;
+    this.onRequestHandler = undefined;
     try {
       // Fail early: a set() while another extension controls the proxy would
       // silently do nothing, leaving a live tunnel with no browser routed
@@ -258,15 +281,17 @@ export class WarrenBrowserVpn {
       // before any traffic follows the proxy.
       await hardenBrowserLeaks(this.chrome.privacy.network);
       hardened = true;
-      await this.applyProxy(res.endpoints, options.split ?? DEFAULT_SPLIT);
-      // A set() that did not take control is a silent no-op: verify.
-      await this.assertProxyControl(['controlled_by_this_extension']);
+      const split = options.split ?? DEFAULT_SPLIT;
+      await this.applyProxy(res.endpoints, split);
+      await this.verifyRouting(split);
       this.proxied = true;
       this.tunnelUp = true;
       this.endpoints = res.endpoints;
+      if (heldHandler) this.chrome.proxy.onRequest?.removeListener(heldHandler);
       return res.endpoints;
     } catch (error) {
       if (hardened) await this.restoreBrowserSettings(before, leaksHeld).catch(() => undefined);
+      this.onRequestHandler = heldHandler;
       this.closePort();
       throw error;
     } finally {
@@ -286,8 +311,19 @@ export class WarrenBrowserVpn {
     if (!this.tunnelUp || !this.endpoints) {
       throw new WarrenExtensionError('not_connected', 'no live tunnel to route through');
     }
-    this.removeOnRequestHandler();
+    // The new routing goes in before the old handler comes out: in between,
+    // Firefox runs both, which tunnels the union of the two rule sets.
+    const previous = this.onRequestHandler;
+    this.onRequestHandler = undefined;
     await this.applyProxy(this.endpoints, split);
+    if (previous) this.chrome.proxy.onRequest?.removeListener(previous);
+    await this.verifyRouting(split);
+  }
+
+  /** A set() that did not take control is a silent no-op: verify it took.
+   * Firefox's only mode routes through a handler and sets nothing to verify. */
+  private async verifyRouting(split: SplitTunnelConfig): Promise<void> {
+    if (this.platform === 'firefox' && split.mode === 'only' && this.onRequestHandler) return;
     await this.assertProxyControl(['controlled_by_this_extension']);
   }
 
@@ -382,7 +418,11 @@ export class WarrenBrowserVpn {
    */
   async disconnect(): Promise<void> {
     if (this.port && !this.portDead) {
-      await this.request({ type: 'disconnect' }).catch(() => undefined);
+      // Bounded: a host that stops answering must not keep the user's explicit
+      // disconnect from restoring direct routing.
+      await withTimeout(this.request({ type: 'disconnect' }), HOST_DISCONNECT_TIMEOUT_MS).catch(
+        () => undefined,
+      );
     }
     await this.clearBrowserSettings();
     this.proxied = false;
@@ -501,5 +541,11 @@ export class WarrenBrowserVpn {
     if (this.port && !this.portDead) this.port.disconnect();
     this.port = undefined;
     this.portDead = false;
+    // A port we close ourselves fires no onDisconnect, so its waiters would
+    // hang for good, a stuck connect with them.
+    for (const [, waiter] of this.pending) {
+      waiter.reject(new WarrenExtensionError('host_unavailable', 'native messaging host closed'));
+    }
+    this.pending.clear();
   }
 }

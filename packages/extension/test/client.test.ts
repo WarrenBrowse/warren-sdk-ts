@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   type ChromeLike,
   type NativePort,
@@ -414,6 +414,103 @@ describe('WarrenBrowserVpn split tunneling', () => {
 
     await vpn.disconnect();
     expect(handler).toBeUndefined();
+  });
+});
+
+describe('WarrenBrowserVpn Firefox only-mode handlers', () => {
+  /** A Firefox chrome whose onRequest handlers are all observable. */
+  function firefoxWithHandlers(script: (req: HostRequest, port: FakePort) => void = healthyHost) {
+    const base = fakeChrome(script, { control: ['controlled_by_this_extension'] });
+    const handlers = new Set<(req: { url: string }) => unknown>();
+    const handlersAtSet: number[] = [];
+    base.chrome.proxy.settings.set = () => {
+      handlersAtSet.push(handlers.size);
+      return Promise.resolve(true);
+    };
+    base.chrome.proxy.onRequest = {
+      addListener: (cb) => {
+        handlers.add(cb);
+      },
+      removeListener: (cb) => {
+        handlers.delete(cb);
+      },
+    };
+    base.chrome.extension = { isAllowedIncognitoAccess: () => Promise.resolve(true) };
+    return { ...base, handlers, handlersAtSet };
+  }
+
+  it('connects in only mode, where Firefox routes through the handler and no proxy setting', async () => {
+    const { chrome, handlers } = firefoxWithHandlers();
+    chrome.proxy.settings.get = () => ({ levelOfControl: 'controllable_by_this_extension' });
+    const vpn = new WarrenBrowserVpn({ chrome, platform: 'firefox' });
+
+    await expect(
+      vpn.connect({ mnemonic: 'm', split: { mode: 'only', rules: ['work.example'] } }),
+    ).resolves.toEqual({ socks5: '127.0.0.1:1080' });
+    expect(handlers.size).toBe(1);
+  });
+
+  it('keeps the only-mode handler until the new routing is in place', async () => {
+    const { chrome, handlers, handlersAtSet } = firefoxWithHandlers();
+    const vpn = new WarrenBrowserVpn({ chrome, platform: 'firefox' });
+    await vpn.connect({ mnemonic: 'm', split: { mode: 'only', rules: ['work.example'] } });
+
+    await vpn.applySplit({ mode: 'all', rules: [] });
+
+    // The old handler still tunnelled work.example while the settings changed.
+    expect(handlersAtSet.at(-1)).toBe(1);
+    expect(handlers.size).toBe(0);
+  });
+
+  it('leaves no handler behind after a reconnect over a dead host and a disconnect', async () => {
+    const { chrome, handlers, port } = firefoxWithHandlers();
+    const vpn = new WarrenBrowserVpn({ chrome, platform: 'firefox' });
+    const only = { mode: 'only' as const, rules: ['work.example'] };
+    await vpn.connect({ mnemonic: 'm', split: only });
+    port.die();
+    await vpn.connect({ mnemonic: 'm', split: only });
+
+    await vpn.disconnect();
+
+    expect(handlers.size).toBe(0);
+  });
+});
+
+describe('WarrenBrowserVpn disconnect with a silent host', () => {
+  it('fails a connect still waiting on the host, so a later connect is not refused', async () => {
+    let answer = false;
+    const { chrome } = fakeChrome((req, p) => {
+      if (answer) healthyHost(req, p);
+    });
+    const vpn = new WarrenBrowserVpn({ chrome });
+    const stuck = vpn.connect({ mnemonic: 'm' }).catch((e: WarrenExtensionError) => e.code);
+    await new Promise((r) => setTimeout(r, 0));
+
+    await vpn.disconnect();
+
+    expect(await stuck).toBe('host_unavailable');
+    answer = true;
+    await expect(vpn.connect({ mnemonic: 'm' })).resolves.toEqual({ socks5: '127.0.0.1:1080' });
+  });
+
+  it('restores direct routing even when the host never answers', async () => {
+    vi.useFakeTimers();
+    try {
+      const { chrome, calls } = fakeChrome((req, p) => {
+        if (req.type !== 'disconnect') healthyHost(req, p);
+      });
+      const vpn = new WarrenBrowserVpn({ chrome });
+      await vpn.connect({ mnemonic: 'm' });
+
+      const done = vpn.disconnect();
+      await vi.advanceTimersByTimeAsync(10_000);
+      await done;
+
+      expect(calls).toContain('proxy.clear');
+      expect(vpn.isProxied()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
