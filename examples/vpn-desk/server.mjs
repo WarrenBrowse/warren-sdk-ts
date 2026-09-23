@@ -215,7 +215,15 @@ async function handleConnect(body) {
     // One-shot datapath (supervised: false) so metrics() returns live counters.
     const connectOptions = { selector, supervised: false };
     if (advanced.httpProxy === true) connectOptions.httpProxy = true;
-    endpoints = await t.connect(connectOptions);
+    // The listeners demand these credentials from every client. This API is
+    // an unauthenticated loopback one, which any local process can read, so
+    // only the addresses are kept for the page.
+    const {
+      username: _username,
+      password: _password,
+      ...listeners
+    } = await t.connect(connectOptions);
+    endpoints = listeners;
     currentExit = { country: chosen.country, city: chosen.city };
     setTunnelState('connected');
     return { endpoints, exit: currentExit };

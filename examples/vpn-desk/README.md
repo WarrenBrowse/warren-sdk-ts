@@ -39,6 +39,9 @@ Environment:
 
 - **Seed isolation**: the mnemonic and seed live only in the Node process; the
   browser talks to a loopback-bound JSON API and never sees identity material.
+  The same holds for the proxy listeners' session credentials, which every
+  client of the SOCKS5 and HTTP listeners must present: the dashboard shows
+  the listener addresses only.
 - **Verified discovery**: exits come from `acceptSignedRelayList`, which
   enforces the signature, expiry, anti-rollback and TOFU pinning. The example
   uses the in-memory stores; a real app supplies persistent

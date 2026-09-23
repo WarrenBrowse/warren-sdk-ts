@@ -83,7 +83,7 @@ export interface ProxyConnectOptions {
    * non-empty, `selector` is ignored and the self-healing datapath is used.
    */
   failoverExitPubkeyHexes?: string[];
-  /** Also bind a local HTTP CONNECT proxy alongside SOCKS5. */
+  /** Also bind a local HTTP proxy (CONNECT, and plain `http://` forwarding) alongside SOCKS5. */
   httpProxy?: boolean;
   /** Resolve DNS over the tunnel at this IPv4 address instead of the exit gateway. */
   dnsServer?: string;
@@ -96,12 +96,23 @@ export interface ProxyConnectOptions {
   supervised?: boolean;
 }
 
-/** Local proxy endpoints a {@link ProxyTunnel} exposes once connected. */
+/**
+ * Local proxy endpoints a {@link ProxyTunnel} exposes once connected, and the
+ * credentials every client of them must present (RFC 1929 on SOCKS5,
+ * `Proxy-Authorization: Basic` on HTTP): the listeners refuse any client
+ * without them, since every account and process on the machine can reach a
+ * loopback port. The password is fresh per session; keep it out of logs, argv
+ * and anything another local account can read.
+ */
 export interface ProxyEndpoints {
   /** SOCKS5 listen address, e.g. `127.0.0.1:1080`. */
   socks5: string;
-  /** HTTP CONNECT listen address, present when `httpProxy` was requested. */
+  /** HTTP proxy listen address, present when `httpProxy` was requested. */
   http?: string;
+  /** The username clients present. */
+  username: string;
+  /** The password clients present. */
+  password: string;
 }
 
 /** A point-in-time snapshot of the tunnel counters (one-shot datapath only). */
@@ -206,7 +217,7 @@ export interface NativeForwardedPort {
 export interface NativeWarrenProxy {
   readonly address: string;
   onState(callback: ((state: string) => void) | null): void;
-  connect(options?: object | null): Promise<{ socks5: string; http?: string }>;
+  connect(options?: object | null): Promise<ProxyEndpoints>;
   shutdown(): Promise<void>;
   metrics(): Promise<ProxyMetrics | null>;
   fatalCause(): Promise<ProxyFatalCause | null>;
@@ -304,9 +315,10 @@ export class ProxyForwardedPort {
 
 /**
  * Non-root proxy datapath: a real Warren multihop tunnel exposed as a local
- * SOCKS5 (and optionally HTTP CONNECT) proxy, backed by the native engine
- * (napi-rs). One instance is one session; {@link shutdown} tears it down
- * (fail-closed, including a shutdown racing an in-flight connect).
+ * SOCKS5 (and optionally HTTP) proxy that admits only clients presenting the
+ * session's credentials, backed by the native engine (napi-rs). One instance
+ * is one session; {@link shutdown} tears it down (fail-closed, including a
+ * shutdown racing an in-flight connect).
  *
  * The mnemonic is passed to native code once and never retained or logged in TS.
  */
@@ -352,7 +364,7 @@ export class ProxyTunnel {
     return this.native.address;
   }
 
-  /** Brings up the tunnel and the local proxy listener(s); resolves with their endpoints. */
+  /** Brings up the tunnel and the local proxy listener(s); resolves with their endpoints and credentials. */
   async connect(options?: ProxyConnectOptions): Promise<ProxyEndpoints> {
     try {
       return await this.native.connect(options ?? null);
@@ -399,8 +411,9 @@ export class ProxyTunnel {
   }
 
   /**
-   * Proves live egress THROUGH the tunnel: the engine's SOCKS5 egress-proof (a
-   * bounded CONNECT to `1.1.1.1:443` via the local proxy). Resolves when egress
+   * Proves live egress THROUGH the tunnel: the engine's SOCKS5 egress-proof (the
+   * listener proves it holds the session's credentials, then a bounded
+   * authenticated CONNECT to `1.1.1.1:443` goes through it). Resolves when egress
    * is proven; rejects with a {@link WarrenProxyError} when it is not (or before
    * {@link ProxyTunnel.connect}), so a consumer can fail closed instead of
    * trusting a tunnel that silently drops traffic.

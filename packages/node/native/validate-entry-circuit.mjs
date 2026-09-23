@@ -29,16 +29,25 @@ if (!mnemonic) {
 const ENTRY = process.env.WARREN_ENTRY_COUNTRY || 'NL';
 const EXIT = process.env.WARREN_EXIT_COUNTRY || 'DE';
 
-// TCP CONNECT probe through the SOCKS5 proxy to a literal IP (no DNS needed):
-// a SYN-ACK back means the byte path traversed the sealed tunnel to the exit.
-function tcpConnectThrough(proxyHost, proxyPort, ip, port) {
+// TCP CONNECT probe through the SOCKS5 proxy to a literal IP (no DNS needed),
+// authenticated with the session credentials (RFC 1929): a SYN-ACK back means
+// the byte path traversed the sealed tunnel to the exit.
+function tcpConnectThrough(proxyHost, proxyPort, auth, ip, port) {
   return new Promise((resolve, reject) => {
     const s = net.connect(proxyPort, proxyHost);
     let stage = 'greet';
-    s.on('connect', () => s.write(Buffer.from([5, 1, 0])));
+    s.on('connect', () => s.write(Buffer.from([5, 1, 2])));
     s.on('data', (d) => {
       if (stage === 'greet') {
-        if (d[0] !== 5 || d[1] !== 0) return reject(new Error('no-auth refused'));
+        if (d[0] !== 5 || d[1] !== 2) return reject(new Error('username/password refused'));
+        const user = Buffer.from(auth.username);
+        const pass = Buffer.from(auth.password);
+        s.write(
+          Buffer.concat([Buffer.from([1, user.length]), user, Buffer.from([pass.length]), pass]),
+        );
+        stage = 'auth';
+      } else if (stage === 'auth') {
+        if (d[0] !== 1 || d[1] !== 0) return reject(new Error('credentials refused'));
         const o = ip.split('.').map(Number);
         s.write(Buffer.from([5, 1, 0, 1, o[0], o[1], o[2], o[3], (port >> 8) & 255, port & 255]));
         stage = 'connect';
@@ -58,11 +67,11 @@ function tcpConnectThrough(proxyHost, proxyPort, ip, port) {
 async function egressThrough(label, opts) {
   const tunnel = ProxyTunnel.create({ mnemonic, apiBase: API_BASE, serverPubkeyPin: PIN });
   try {
-    const { socks5 } = await tunnel.connect(opts);
+    const { socks5, username, password } = await tunnel.connect(opts);
     const [h, p] = socks5.split(':');
     let ok = false;
     for (let i = 1; i <= 15 && !ok; i++) {
-      ok = await tcpConnectThrough(h, +p, '1.1.1.1', 443)
+      ok = await tcpConnectThrough(h, +p, { username, password }, '1.1.1.1', 443)
         .then(() => true)
         .catch(() => false);
     }

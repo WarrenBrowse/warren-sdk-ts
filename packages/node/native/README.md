@@ -23,14 +23,28 @@ daemon instead (`../src/warrend`).
 
 ## Build (local)
 
-Requires the Rust toolchain and the sibling engine checkouts `../warren-sdk-rs`
-AND `../warrenguard` (the Cargo `[patch]` table resolves the engine's crates
-from both; see `warren-napi/Cargo.toml`).
+`warren-napi/Cargo.toml` pins `warren-sdk` to one warren-sdk-rs commit, and its
+`[patch]` table resolves the engine's warrenguard and warren-contract crates
+from the sibling checkouts `../warrenguard` and `../warren-contract`, which must
+sit at the revs that commit names in its `.warrenguard-version` and
+`.warren-contract-version`. Cargo fetches the pinned commit itself (the repo is
+private, so git needs read access to it).
+
+To build against the working copy `../warren-sdk-rs` instead, add the gitignored
+override below; with it, the working copy must sit at the pinned commit for the
+build to be the pinned one. Bumping the pin is changing the `rev` in
+`warren-napi/Cargo.toml` (and `warren-napi/.warrenguard-engine-rev` to the
+warrenguard rev it names).
 
 ```bash
 cd warren-napi
+mkdir -p .cargo
+cat > .cargo/config.toml <<'EOF'
+[patch."https://github.com/WarrenBrowse/warren-sdk-rs.git"]
+warren-sdk = { path = "../../../../../warren-sdk-rs/crates/warren-sdk" }
+EOF
 # Reuse the engine's target cache to skip recompiling its dependency tree.
-CARGO_TARGET_DIR=../../../../../warren-sdk-rs/target pnpm --package=@napi-rs/cli dlx napi build --release
+CARGO_TARGET_DIR=../../../../../warren-sdk-rs/target pnpm --package=@napi-rs/cli dlx napi build --release --dts index.generated.d.ts
 ```
 
 This emits `warren-napi.node` next to `index.cjs`. The loader finds it
@@ -58,23 +72,19 @@ egress probe 1.1.1.1:443 CONNECT ok (SYN-ACK via the exit, attempt 2)
 PASS: TCP egress through the sealed tunnel confirmed (via packaged ProxyTunnel)
 ```
 
-## Release / prebuilds (remaining productionization)
+## Release / prebuilds
 
-Publishing a usable npm package needs a prebuilt `.node` per OS/arch. The intended
-flow (standard napi-rs):
+The `native-prebuilds` workflow (dispatched by hand) builds the addon for
+darwin-arm64, linux-x64 and win32-x64 against the pinned engine: it checks out
+warren-sdk-rs at the `rev` in `warren-napi/Cargo.toml`, warrenguard and
+warren-contract at the revs that commit names, and publishes each binary to the
+rolling `native-prebuilds` release. Installing a prebuilt is dropping it next to
+`index.cjs` under its `warren-napi.<platform>-<arch>.node` name.
 
-1. Pin the engine by git tag in `warren-napi/Cargo.toml` (as the Dart SDK pins
-   `warren-sdk`); keep the sibling path for local co-development via a gitignored
-   `.cargo/config.toml` override. The authoritative engine rev is tracked in
-   `warren-napi/.warrenguard-engine-rev`; `@warrenbrowse/sdk-node`'s
-   `prepublishOnly` runs `scripts/assert-engine-protocol.mjs`, which blocks
-   `npm publish` unless the engine that compiles into the addon speaks a
-   live-fleet wire protocol (its `PROTOCOL_VERSION` is >= v5 in-band client
-   auth; a v4 engine cannot connect to the all-v5+ exit fleet).
-2. `napi build --release --target <triple>` on each target and publish the
-   per-platform packages as `optionalDependencies` (the loader already resolves
-   the triple-suffixed binary).
-
-This step needs a cut engine tag and CI access to the private engine repos
-(`warren-sdk-rs` + `warrenguard`); it is not wired into the JS CI, which stays
-JS-only and green.
+`@warrenbrowse/sdk-node`'s `prepublishOnly` runs
+`scripts/assert-engine-protocol.mjs`, which blocks `npm publish` unless the
+engine that compiles into the addon speaks a live-fleet wire protocol (its
+`PROTOCOL_VERSION` is >= v5 in-band client auth; a v4 engine cannot connect to
+the all-v5+ exit fleet). Publishing the per-platform binaries as npm
+`optionalDependencies` (the loader already resolves the triple-suffixed name) is
+not wired yet; the JS CI stays JS-only.

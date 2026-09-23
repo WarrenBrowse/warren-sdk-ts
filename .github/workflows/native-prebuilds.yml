@@ -7,9 +7,13 @@
 # WarrenBrowse/warren-sdk-rs, warrenguard and warren-contract (same one-time
 # manual setup as VECTORS_TOKEN; those PATs cannot be minted via the API).
 #
-# The warren-napi Cargo.toml resolves the engine through sibling checkouts
-# five levels up, exactly like the local dev layout, so the engine repos are
-# checked out as siblings of this repo's checkout directory.
+# The warren-napi Cargo.toml pins warren-sdk-rs by commit and patches the
+# warrenguard and warren-contract crates to sibling checkouts five levels up,
+# exactly like the local dev layout. The job checks the three engine repos out
+# as siblings of this repo's checkout directory, each at the rev that pin
+# implies (warren-sdk-rs at the pin, the other two at the revs its marker files
+# name), and builds against the checked-out warren-sdk-rs through the same
+# gitignored override a developer uses, so cargo never fetches a private repo.
 #
 # Binaries are published as assets on the rolling `native-prebuilds` release,
 # NOT as Actions artifacts: the org artifact storage quota is exhausted (hit
@@ -50,33 +54,55 @@ jobs:
         # node_modules and the whole leg dies before the build. Removing it up
         # front lets the setup reinstall cleanly.
         run: |
-          rm -rf .git sdk-ts engine 2>/dev/null || true
+          rm -rf .git sdk-ts engine warren-sdk-rs warrenguard warren-contract 2>/dev/null || true
           rm -rf "$HOME/setup-pnpm" "${USERPROFILE:-/nonexistent}/setup-pnpm" 2>/dev/null || true
       - uses: actions/checkout@v4
         with:
           path: sdk-ts
+      - name: Engine revs from the pin
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          rev="$(sed -n -E 's/^warren-sdk = \{ git = "https:\/\/github.com\/WarrenBrowse\/warren-sdk-rs.git", rev = "([0-9a-f]{40})" \}$/\1/p' sdk-ts/packages/node/native/warren-napi/Cargo.toml)"
+          test -n "$rev" || { echo "::error::no warren-sdk rev pin in warren-napi/Cargo.toml"; exit 1; }
+          echo "sdk=$rev" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           repository: WarrenBrowse/warren-sdk-rs
+          ref: ${{ steps.pin.outputs.sdk }}
           token: ${{ secrets.ENGINE_TOKEN }}
           path: warren-sdk-rs
+      - name: Sibling revs the pinned engine names
+        id: siblings
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "warrenguard=$(tr -d '[:space:]' < warren-sdk-rs/.warrenguard-version)" >> "$GITHUB_OUTPUT"
+          echo "contract=$(tr -d '[:space:]' < warren-sdk-rs/.warren-contract-version)" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v4
         with:
           repository: WarrenBrowse/warrenguard
+          ref: ${{ steps.siblings.outputs.warrenguard }}
           token: ${{ secrets.ENGINE_TOKEN }}
           path: warrenguard
       - uses: actions/checkout@v4
         with:
           repository: WarrenBrowse/warren-contract
+          ref: ${{ steps.siblings.outputs.contract }}
           token: ${{ secrets.ENGINE_TOKEN }}
           path: warren-contract
       # The Cargo patch table resolves ../../../../../<repo> from the crate dir,
-      # which is the parent of the sdk-ts checkout: move the siblings there.
-      - name: Lay out engine siblings
+      # which is the parent of the sdk-ts checkout, where the siblings now sit.
+      - name: Build against the checked-out engine
         shell: bash
         run: |
-          ls sdk-ts/packages/node/native/warren-napi/Cargo.toml
+          set -euo pipefail
           test -d warren-sdk-rs && test -d warrenguard && test -d warren-contract
+          mkdir -p sdk-ts/packages/node/native/warren-napi/.cargo
+          printf '%s\n' '[patch."https://github.com/WarrenBrowse/warren-sdk-rs.git"]' \
+            'warren-sdk = { path = "../../../../../warren-sdk-rs/crates/warren-sdk" }' \
+            > sdk-ts/packages/node/native/warren-napi/.cargo/config.toml
       - uses: pnpm/action-setup@v4
         with:
           package_json_file: sdk-ts/package.json
@@ -87,7 +113,9 @@ jobs:
       # has no ambient rustup, and the macOS ARM64 runner has rust but not
       # rustup on this job's PATH (a bare `rustup target add` there fails with
       # "command not found"). dtolnay provides rustup + the host target on all.
-      - uses: dtolnay/rust-toolchain@1.89.0
+      # The version follows warren-sdk-rs's rust-toolchain.toml, the engine's
+      # floor (smoltcp 0.14 needs 1.91).
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
           targets: ${{ matrix.target }}
       - name: Rust target

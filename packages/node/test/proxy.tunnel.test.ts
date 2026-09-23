@@ -86,8 +86,8 @@ class ScriptedNative implements NativeWarrenProxy {
   emit(state: string): void {
     this.stateCb?.(state);
   }
-  async connect(): Promise<{ socks5: string; http?: string }> {
-    return { socks5: '127.0.0.1:0' };
+  async connect(): Promise<{ socks5: string; username: string; password: string }> {
+    return { socks5: '127.0.0.1:0', username: 'warren', password: 'x' };
   }
   async shutdown(): Promise<void> {}
   async metrics(): Promise<ProxyMetrics | null> {

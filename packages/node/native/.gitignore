@@ -1,3 +1,7 @@
 target/
 *.node
 Cargo.lock
+# The local override that builds the addon against a working copy of the
+# engine (see README.md); never committed, so the Cargo.toml pin stays the one
+# source of truth.
+.cargo/

@@ -12,32 +12,41 @@ napi = { version = "2", default-features = false, features = ["napi8", "tokio_rt
 napi-derive = "2"
 tokio = { version = "1", features = ["sync"] }
 hex = "0.4"
-# The Warren engine. Releases pin it by git tag (as the Dart SDK pins warren-sdk);
-# this sibling-checkout path is the local co-development form.
-warren-sdk = { path = "../../../../../warren-sdk-rs/crates/warren-sdk" }
+# The Warren engine, pinned by commit so every build of the addon (local,
+# prebuild CI, release) compiles the same engine, as the Dart SDK pins
+# warren-sdk. Cargo.lock is not tracked here, so this rev is the whole pin. To
+# build against a working copy of warren-sdk-rs instead, use the gitignored
+# override described in ../README.md.
+warren-sdk = { git = "https://github.com/WarrenBrowse/warren-sdk-rs.git", rev = "326ab002487503bd8f8b5ee7a42255f9797dc369" }
 
 [build-dependencies]
 napi-build = "2"
 
-# Mirror of warren-sdk-rs's workspace `[patch]` table. The engine and contract
-# crates are git deps of warren-sdk-rs, but warren-contract references
-# warrenguard-wire by a relative path, so it only resolves when both are patched
-# to their sibling checkouts. warren-sdk-rs applies these patches in its own
-# workspace root; this package sits outside that workspace (path dep on
-# warren-sdk) and does not inherit them, so it must repeat them here. Keep in
-# lockstep with warren-sdk-rs/Cargo.toml.
+# Mirror of warren-sdk-rs's workspace `[patch]` table, less the crates only its
+# TUN datapath pulls in. The engine and contract crates are git deps of
+# warren-sdk-rs, but warren-contract references warrenguard-wire by a relative
+# path, so it only resolves when both are patched to their sibling checkouts,
+# at the revs the pinned warren-sdk-rs names in its `.warrenguard-version` and
+# `.warren-contract-version`. warren-sdk-rs applies these patches in its own
+# workspace root; this package sits outside that workspace and does not inherit
+# them, so it repeats them here. Keep in lockstep with warren-sdk-rs/Cargo.toml.
 [patch."https://github.com/WarrenBrowse/warrenguard.git"]
 warrenguard-wire = { path = "../../../../../warrenguard/crates/warrenguard-wire" }
 warrenguard-identity = { path = "../../../../../warrenguard/crates/warrenguard-identity" }
 warrenguard-multihop = { path = "../../../../../warrenguard/crates/warrenguard-multihop" }
 warrenguard-daita = { path = "../../../../../warrenguard/crates/warrenguard-daita" }
 warrenguard-tls = { path = "../../../../../warrenguard/crates/warrenguard-tls" }
+warrenguard-tcp-fallback = { path = "../../../../../warrenguard/crates/warrenguard-tcp-fallback" }
 warrenguard-natpmp-protocol = { path = "../../../../../warrenguard/crates/warrenguard-natpmp-protocol" }
 warrenguard-tun-core = { path = "../../../../../warrenguard/crates/warrenguard-tun-core" }
 warrenguard-tun-device = { path = "../../../../../warrenguard/crates/warrenguard-tun-device" }
 warrenguard-backoff = { path = "../../../../../warrenguard/crates/warrenguard-backoff" }
+warrenguard-token = { path = "../../../../../warrenguard/crates/warrenguard-token" }
+warrenguard-socket-bypass = { path = "../../../../../warrenguard/crates/warrenguard-socket-bypass" }
 warrenguard-transport = { path = "../../../../../warrenguard/crates/warrenguard-transport" }
 warrenguard-transport-core = { path = "../../../../../warrenguard/crates/warrenguard-transport-core" }
+warrenguard-config = { path = "../../../../../warrenguard/crates/warrenguard-config" }
+warrenguard-pump = { path = "../../../../../warrenguard/crates/warrenguard-pump" }
 
 [patch."https://github.com/WarrenBrowse/warren-contract.git"]
 warren-contract = { path = "../../../../../warren-contract" }

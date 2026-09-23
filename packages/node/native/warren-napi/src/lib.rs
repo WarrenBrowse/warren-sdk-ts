@@ -174,7 +174,8 @@ pub struct ConnectOptions {
     /// one, wrapping around the list. When non-empty, `selector` is ignored and
     /// the self-healing datapath is always used (failover needs it).
     pub failover_exit_pubkey_hexes: Option<Vec<String>>,
-    /// Also bind a local HTTP CONNECT proxy alongside SOCKS5.
+    /// Also bind a local HTTP proxy (CONNECT, and plain `http://` forwarding)
+    /// alongside SOCKS5.
     pub http_proxy: Option<bool>,
     /// Resolve DNS over the tunnel at this IPv4 address instead of the exit
     /// gateway forwarder. Needed for an exit that runs no DNS forwarder.
@@ -189,13 +190,21 @@ pub struct ConnectOptions {
     pub supervised: Option<bool>,
 }
 
-/// The bound proxy listener addresses returned by `connect()`.
+/// The bound proxy listener addresses returned by `connect()`, and the
+/// credentials every client of them must present (RFC 1929 on SOCKS5,
+/// `Proxy-Authorization: Basic` on HTTP): the listeners refuse any client
+/// without them. The password is a per-session secret; keep it out of logs,
+/// argv and anything another local account can read.
 #[napi(object)]
 pub struct ConnectEndpoints {
     /// The SOCKS5 listener address (`ip:port`).
     pub socks5: String,
-    /// The HTTP CONNECT listener address, if `httpProxy` was requested.
+    /// The HTTP proxy listener address, if `httpProxy` was requested.
     pub http: Option<String>,
+    /// The username clients present.
+    pub username: String,
+    /// The password clients present.
+    pub password: String,
 }
 
 /// A point-in-time snapshot of the multihop session counters. Only available
@@ -316,10 +325,19 @@ impl ProxySession {
         }
     }
 
+    fn credentials(&self) -> &warren_sdk::net::ProxyCredentials {
+        match self {
+            Self::Plain(h) => h.credentials(),
+            Self::Supervised(h) => h.credentials(),
+        }
+    }
+
     fn endpoints(&self) -> ConnectEndpoints {
         ConnectEndpoints {
             socks5: self.socks5_addr().to_string(),
             http: self.http_addr().map(|a| a.to_string()),
+            username: self.credentials().username().to_owned(),
+            password: self.credentials().password().to_owned(),
         }
     }
 
@@ -649,32 +667,39 @@ impl WarrenProxy {
     }
 
     /// Proves live egress THROUGH the tunnel: runs the engine's SOCKS5
-    /// egress-proof (a bounded no-auth CONNECT to `1.1.1.1:443` via the local
-    /// proxy, the doc-62 contract in `warren_sdk::socks_egress`). Resolves when
+    /// egress-proof, the doc-62 contract in `warren_sdk::socks_egress` (the
+    /// listener first proves it holds the session's credentials, then a bounded
+    /// authenticated CONNECT to `1.1.1.1:443` goes through it). Resolves when
     /// egress is proven; rejects (`egress: ...`) when it is not, so a caller can
     /// fail closed instead of handing traffic to a tunnel that silently drops
     /// it. Rejects with `egress: not connected` before `connect()`.
     #[napi]
     pub async fn verify_egress(&self) -> napi::Result<()> {
-        // Read the listener address under the lock, then probe OUTSIDE it: the
-        // proof does real network I/O and must not hold the session lock.
-        let socks = self
+        // Read the listener address and credentials under the lock, then probe
+        // OUTSIDE it: the proof does real network I/O and must not hold the
+        // session lock.
+        let (socks, credentials) = self
             .slot
-            .with_connected(|s| s.proxy.socks5_addr())
+            .with_connected(|s| (s.proxy.socks5_addr(), s.proxy.credentials().clone()))
             .await
             .ok_or_else(|| err("egress", "not connected"))?;
         warren_sdk::socks_egress::verify_first_egress(
             socks,
+            &credentials,
             warren_sdk::socks_egress::FIRST_EGRESS_VERIFY,
         )
         .await
         // Surface only the safe attempt count: the underlying probe error can
         // carry addresses (no-log), so it never crosses the boundary.
-        .map_err(|dead| {
-            err(
+        .map_err(|e| match e {
+            warren_sdk::socks_egress::FirstEgressError::Dead(dead) => err(
                 "egress",
                 format_args!("egress not proven after {} probe attempts", dead.attempts),
-            )
+            ),
+            _ => err(
+                "egress",
+                "the local listener did not prove it holds this session's credentials",
+            ),
         })
     }
 
@@ -765,6 +790,8 @@ impl WarrenProxy {
             socks5: "127.0.0.1:0".parse().expect("valid literal address"),
             http: http_proxy.then(|| "127.0.0.1:0".parse().expect("valid literal address")),
             dns_server,
+            // Fresh per session, handed back in `ConnectEndpoints`.
+            credentials: None,
         };
 
         let failover = options.failover_exit_pubkey_hexes.unwrap_or_default();

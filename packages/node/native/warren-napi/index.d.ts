@@ -65,7 +65,7 @@ export interface ConnectOptions {
    * used (failover needs it).
    */
   failoverExitPubkeyHexes?: string[];
-  /** Also bind a local HTTP CONNECT proxy alongside SOCKS5. */
+  /** Also bind a local HTTP proxy (CONNECT, and plain `http://` forwarding) alongside SOCKS5. */
   httpProxy?: boolean;
   /**
    * Resolve DNS over the tunnel at this IPv4 address instead of the exit
@@ -83,12 +83,22 @@ export interface ConnectOptions {
   supervised?: boolean;
 }
 
-/** The bound proxy listener addresses returned by `connect()`. */
+/**
+ * The bound proxy listener addresses returned by `connect()`, and the
+ * credentials every client of them must present (RFC 1929 on SOCKS5,
+ * `Proxy-Authorization: Basic` on HTTP): the listeners refuse any client
+ * without them. The password is a per-session secret; keep it out of logs,
+ * argv and anything another local account can read.
+ */
 export interface ConnectEndpoints {
   /** The SOCKS5 listener address (`ip:port`). */
   socks5: string;
-  /** The HTTP CONNECT listener address, if `httpProxy` was requested. */
+  /** The HTTP proxy listener address, if `httpProxy` was requested. */
   http?: string;
+  /** The username clients present. */
+  username: string;
+  /** The password clients present. */
+  password: string;
 }
 
 /**
@@ -191,8 +201,9 @@ export declare class WarrenProxy {
   fatalCause(): Promise<FatalCauseJs | null>;
 
   /**
-   * Proves live egress THROUGH the tunnel: the engine's SOCKS5 egress-proof (a
-   * bounded CONNECT to `1.1.1.1:443` via the local proxy). Resolves when egress
+   * Proves live egress THROUGH the tunnel: the engine's SOCKS5 egress-proof (the
+   * listener proves it holds the session's credentials, then a bounded
+   * authenticated CONNECT to `1.1.1.1:443` goes through it). Resolves when egress
    * is proven; rejects when it is not (or before `connect()`), so a caller can
    * fail closed instead of trusting a tunnel that silently drops traffic.
    */
