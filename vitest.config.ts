@@ -14,6 +14,11 @@ export default defineConfig({
     // a bound that only a hang can reach.
     testTimeout: process.platform === 'win32' ? 120000 : 60000,
     hookTimeout: process.platform === 'win32' ? 120000 : 60000,
+    // A forked worker must answer within vitest's fixed 60 s: on that loaded
+    // VM a full set of workers starting together missed it and the files they
+    // held never ran ("Timeout waiting for worker to respond").
+    // Two at a time start well inside it.
+    ...(process.platform === 'win32' ? { maxWorkers: 2 } : {}),
     coverage: {
       provider: 'v8',
       include: ['packages/*/src/**/*.ts'],
