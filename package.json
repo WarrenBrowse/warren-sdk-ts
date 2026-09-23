@@ -21,9 +21,10 @@
   "devDependencies": {
     "@biomejs/biome": "^1",
     "@types/node": "^20",
-    "@vitest/coverage-v8": "^2",
+    "@vitest/coverage-v8": "^4.1.11",
     "tsup": "^8",
     "typescript": "^5",
-    "vitest": "^2"
+    "vite": "^7.3.6",
+    "vitest": "^4.1.11"
   }
 }
