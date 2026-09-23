@@ -28,6 +28,23 @@ export const FAIL_CLOSED_PROXY: readonly { type: 'https'; host: string; port: nu
   { type: 'https', host: '127.0.0.1', port: 1 },
 ];
 
+/** Where a Chromium lockdown points the browser: the same loopback port 1, so
+ * a request fails at once instead of waiting on a timeout. */
+export const LOCKDOWN_PROXY = { scheme: 'https', host: '127.0.0.1', port: 1 } as const;
+
+/**
+ * The `chrome.proxy.settings` value of a lockdown: every request goes to a
+ * proxy that cannot answer, except loopback and the exempt hosts. A
+ * `fixed_servers` list holds no `DIRECT` fallback, so a refused proxy stalls
+ * the request rather than sending it around the proxy.
+ */
+export function buildChromiumLockdownValue(exempt: readonly string[]): unknown {
+  return {
+    mode: 'fixed_servers',
+    rules: { singleProxy: { ...LOCKDOWN_PROXY }, bypassList: [...LOOPBACK_BYPASS, ...exempt] },
+  };
+}
+
 /**
  * Whether `host` matches a rule. A bare domain (`example.com`) matches itself
  * and every subdomain; a `.example.com` or `*.example.com` rule matches

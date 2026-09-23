@@ -60,13 +60,16 @@ launch. Auto-lock and explicit lock wipe both.
   proxy is applied and both restored on explicit disconnect. DNS stays on the
   tunnel: both browsers hand hostnames to the proxy, which resolves at the exit.
 - **Fail-closed.** Once connected, the proxy settings are only removed by an
-  explicit `disconnect()`. If the host dies, the browser keeps pointing at the
-  dead proxy: traffic blackholes instead of leaking around the tunnel. The host
+  explicit `disconnect()`. If the host dies, the port it released is anyone's
+  to bind, so the browser never stays pointed at it: Chromium moves onto the
+  lockdown block (a loopback proxy nothing answers), Firefox's per-request
+  handler refuses the dead listener, and `onHostLost()` listeners hear it so
+  the product can record its hold. Traffic stalls instead of leaking. The host
   side mirrors this: browser gone (stdin EOF) means the tunnel dies with the
   process. A failed `connect()` leaves the browser as it found it: a routing
-  this extension already held (a lockdown, or a tunnel whose host died) is put
-  back rather than cleared, and `connect()` over a dead tunnel reconnects in
-  place. `applySplit()` changes the rules of a live tunnel without tearing it
+  this extension already held (a lockdown, or the block a dead host left) is
+  put back rather than cleared, and `connect()` over a dead tunnel reconnects
+  in place. `applySplit()` changes the rules of a live tunnel without tearing it
   down, so a rule edit never opens a direct window.
 - **Lockdown.** A `LockdownState` saved to the routing store and installed with
   `installChromiumRouting` (or answered by `attachFirefoxRouting`) holds the

@@ -47,9 +47,15 @@
 import { base64urlnopad } from '@scure/base';
 import { WarrenExtensionError } from './client.js';
 import type { ExtensionProxyAuth } from './protocol.js';
-import { FAIL_CLOSED_PROXY, type SplitTunnelConfig, shouldTunnelHost } from './split.js';
+import {
+  FAIL_CLOSED_PROXY,
+  LOCKDOWN_PROXY,
+  type SplitTunnelConfig,
+  buildChromiumLockdownValue,
+  shouldTunnelHost,
+} from './split.js';
 
-export { FAIL_CLOSED_PROXY };
+export { FAIL_CLOSED_PROXY, buildChromiumLockdownValue };
 
 /** The fixed username the credential rides under; only the password varies. */
 export const CREDENTIAL_USERNAME = 'warren';
@@ -224,10 +230,6 @@ export interface FirefoxProxyInfo {
   password?: string;
 }
 
-/** Where a lockdown points the browser: loopback port 1, which nothing listens
- * on, so a request fails at once instead of waiting on a timeout. */
-const LOCKDOWN_PROXY = { scheme: 'https', host: '127.0.0.1', port: 1 } as const;
-
 const ROUTING_KEY = 'warren.routing';
 
 /** The Basic authorization header value for a credential. */
@@ -304,19 +306,6 @@ function buildIngressPac(host: string, port: number, split: SplitTunnelConfig): 
   var tunnel = ${onlyMode ? 'matched' : '!matched'};
   return tunnel ? 'HTTPS ${host}:${port}' : 'DIRECT';
 }`;
-}
-
-/**
- * The `chrome.proxy.settings` value of a lockdown: every request goes to a
- * proxy that cannot answer, except loopback and the exempt hosts. A
- * `fixed_servers` list holds no `DIRECT` fallback, so a refused proxy stalls
- * the request rather than sending it around the proxy.
- */
-export function buildChromiumLockdownValue(exempt: readonly string[]): unknown {
-  return {
-    mode: 'fixed_servers',
-    rules: { singleProxy: { ...LOCKDOWN_PROXY }, bypassList: [...LOOPBACK_BYPASS, ...exempt] },
-  };
 }
 
 function isLockdownValue(value: unknown): boolean {

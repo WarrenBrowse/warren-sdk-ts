@@ -4,6 +4,7 @@ import {
   type NativePort,
   WarrenBrowserVpn,
   WarrenExtensionError,
+  buildChromiumLockdownValue,
 } from '../src/index.js';
 import { EXTENSION_PROTOCOL_VERSION, type HostRequest } from '../src/protocol.js';
 
@@ -300,7 +301,7 @@ describe('WarrenBrowserVpn proxy control and leak hardening', () => {
 });
 
 describe('WarrenBrowserVpn fail-closed behavior', () => {
-  it('keeps the proxy settings when the host dies while connected', async () => {
+  it('moves Chromium off the port a dead host released, onto the block, never direct', async () => {
     const { chrome, calls, port } = fakeChrome(healthyHost);
     const states: string[] = [];
     const vpn = new WarrenBrowserVpn({ chrome, onState: (s) => states.push(s) });
@@ -308,10 +309,63 @@ describe('WarrenBrowserVpn fail-closed behavior', () => {
 
     port.die();
 
-    // Traffic must blackhole on the dead proxy rather than leak around it;
-    // only an explicit user disconnect() clears the settings.
+    // Any local process can bind the released port and would receive the
+    // browser's traffic: the browser must stall on a proxy nothing answers.
+    expect(calls.filter((c) => c.startsWith('proxy.set:')).at(-1)).toBe(
+      `proxy.set:${JSON.stringify(buildChromiumLockdownValue([]))}`,
+    );
     expect(calls).not.toContain('proxy.clear');
+    expect(vpn.isProxied()).toBe(true);
     expect(states).toContain('failed');
+  });
+
+  it('reports the loss of the host that carried the tunnel', async () => {
+    const { chrome, port } = fakeChrome(healthyHost);
+    const vpn = new WarrenBrowserVpn({ chrome });
+    const lost = vi.fn();
+    vpn.onHostLost(lost);
+    await vpn.connect({ mnemonic: 'm' });
+
+    port.die();
+
+    expect(lost).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports and blocks nothing when the host exits on an explicit disconnect', async () => {
+    const { chrome, calls } = fakeChrome((req, p) => {
+      healthyHost(req, p);
+      if (req.type === 'disconnect') p.die();
+    });
+    const vpn = new WarrenBrowserVpn({ chrome });
+    const lost = vi.fn();
+    vpn.onHostLost(lost);
+    await vpn.connect({ mnemonic: 'm' });
+
+    await vpn.disconnect();
+
+    expect(lost).not.toHaveBeenCalled();
+    expect(calls.filter((c) => c.startsWith('proxy.')).at(-1)).toBe('proxy.clear');
+  });
+
+  it('reports nothing when a host that carried no tunnel dies', async () => {
+    const { chrome, port } = fakeChrome((req, p) => {
+      healthyHost(req, p);
+      if (req.type === 'status') {
+        p.emit({ id: req.id, ok: true, type: 'status', state: 'disconnected' });
+      }
+    });
+    const vpn = new WarrenBrowserVpn({ chrome });
+    const lost = vi.fn();
+    vpn.onHostLost(lost);
+    await vpn.connect({ mnemonic: 'm' });
+    port.die();
+    // Asking for the state spawns a fresh host with no tunnel; its death
+    // releases no port the browser is routed at.
+    await vpn.status();
+
+    port.die();
+
+    expect(lost).toHaveBeenCalledTimes(1);
   });
 
   it('disconnect() clears the proxy and the WebRTC policy and closes the port', async () => {
@@ -625,6 +679,20 @@ describe('WarrenBrowserVpn on Firefox', () => {
     base.chrome.proxy.onRequest = { addListener: () => undefined, removeListener: () => undefined };
     return { ...base, values };
   }
+
+  it('leaves a dead host to the per-request handler, which fails closed, and still reports it', async () => {
+    const { chrome, values, port } = firefoxChrome(healthyHost);
+    const vpn = new WarrenBrowserVpn({ chrome, platform: 'firefox' });
+    const lost = vi.fn();
+    vpn.onHostLost(lost);
+    await vpn.connect({ mnemonic: 'm' });
+    const applied = values.length;
+
+    port.die();
+
+    expect(values).toHaveLength(applied);
+    expect(lost).toHaveBeenCalledTimes(1);
+  });
 
   it('applies the Firefox manual-socks settings shape with explicit proxyDNS', async () => {
     const { chrome, values } = firefoxChrome(healthyHost);

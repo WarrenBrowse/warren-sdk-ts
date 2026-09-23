@@ -16,6 +16,7 @@ import {
   DEFAULT_SPLIT,
   FAIL_CLOSED_PROXY,
   type SplitTunnelConfig,
+  buildChromiumLockdownValue,
   buildChromiumProxyValue,
   buildFirefoxProxyValue,
   shouldTunnelHost,
@@ -185,11 +186,13 @@ function listenerAuth(auth: unknown): ExtensionProxyAuth | undefined {
  * (see `attachChromiumProxyAuth`).
  *
  * Fail-closed policy: once connected, the proxy settings are only ever removed
- * by an explicit {@link disconnect}. If the host dies, the browser keeps
- * pointing at the dead proxy (traffic blackholes, it does not leak around the
- * tunnel) and `onState('failed')` fires. A failed connect leaves the browser as
- * it found it: a routing this extension already held (a lockdown, or a tunnel
- * whose host died) is put back, never replaced by a direct route.
+ * by an explicit {@link disconnect}. If the host dies, the port it released is
+ * anyone's to bind, so the browser never stays pointed at it: Chromium moves
+ * onto the lockdown block (a loopback proxy nothing answers), Firefox's
+ * per-request handler refuses the dead listener, `onState('failed')` fires and
+ * the {@link onHostLost} listeners hear it. A failed connect leaves the browser
+ * as it found it: a routing this extension already held (a lockdown, or the
+ * block a dead host left) is put back, never replaced by a direct route.
  *
  * Requires manifest permissions: `proxy`, `privacy`, `nativeMessaging`.
  */
@@ -209,6 +212,10 @@ export class WarrenBrowserVpn {
   /** The credentials of the live host's listeners; dropped with the host. */
   private auth: ExtensionProxyAuth | undefined;
   private connecting = false;
+  /** Set for the length of an explicit {@link disconnect}, whose host may exit
+   * on its own once it has answered: that exit is not a lost host. */
+  private releasing = false;
+  private readonly hostLostListeners: Array<() => void> = [];
   private nextId = 1;
   private onRequestHandler: ((request: { url: string }) => unknown) | undefined;
   private readonly pending = new Map<
@@ -256,6 +263,16 @@ export class WarrenBrowserVpn {
     return listener === endpoints.http || listener === endpoints.socks5
       ? { ...this.auth }
       : undefined;
+  }
+
+  /**
+   * Registers `listener` for the loss of the host that carried the live
+   * tunnel, without an explicit {@link disconnect}. By the time it runs,
+   * Chromium already stalls on the lockdown block; the listener decides what
+   * protection the product holds next.
+   */
+  onHostLost(listener: () => void): void {
+    this.hostLostListeners.push(listener);
   }
 
   /**
@@ -472,19 +489,24 @@ export class WarrenBrowserVpn {
    * the proxy settings and restores the WebRTC policy.
    */
   async disconnect(): Promise<void> {
-    if (this.port && !this.portDead) {
-      // Bounded: a host that stops answering must not keep the user's explicit
-      // disconnect from restoring direct routing.
-      await withTimeout(this.request({ type: 'disconnect' }), HOST_DISCONNECT_TIMEOUT_MS).catch(
-        () => undefined,
-      );
+    this.releasing = true;
+    try {
+      if (this.port && !this.portDead) {
+        // Bounded: a host that stops answering must not keep the user's explicit
+        // disconnect from restoring direct routing.
+        await withTimeout(this.request({ type: 'disconnect' }), HOST_DISCONNECT_TIMEOUT_MS).catch(
+          () => undefined,
+        );
+      }
+      await this.clearBrowserSettings();
+      this.proxied = false;
+      this.tunnelUp = false;
+      this.endpoints = undefined;
+      this.auth = undefined;
+      this.closePort();
+    } finally {
+      this.releasing = false;
     }
-    await this.clearBrowserSettings();
-    this.proxied = false;
-    this.tunnelUp = false;
-    this.endpoints = undefined;
-    this.auth = undefined;
-    this.closePort();
   }
 
   private async applyProxy(endpoints: ExtensionEndpoints, split: SplitTunnelConfig): Promise<void> {
@@ -550,6 +572,9 @@ export class WarrenBrowserVpn {
     port.onMessage.addListener((raw) => this.onMessage(raw));
     port.onDisconnect.addListener(() => {
       this.portDead = true;
+      // Only the host that built the live tunnel owned the ports the browser
+      // is routed at; a host spawned since to report a state owned none.
+      const lost = this.tunnelUp && !this.releasing;
       this.tunnelUp = false;
       // The host took its listeners with it: nothing may answer for them now.
       this.auth = undefined;
@@ -560,11 +585,31 @@ export class WarrenBrowserVpn {
         );
       }
       this.pending.clear();
-      // Fail-closed: this.proxied stays true and the proxy settings stay in
-      // place; only an explicit disconnect() clears them.
+      // Fail-closed: this.proxied stays true and the routing stays ours; only
+      // an explicit disconnect() sends the browser direct.
+      if (lost) this.blockReleasedListener();
       if (wasProxied) this.onState?.('failed');
+      if (lost) for (const listener of this.hostLostListeners) listener();
     });
     return port;
+  }
+
+  /**
+   * Moves Chromium off a dead host's listener: any local process can bind the
+   * port it released and would then receive the browser's requests. Firefox
+   * needs nothing here, its per-request handler refuses a listener whose host
+   * is gone. Best effort: a set that does not take leaves the lost-host
+   * listeners to hold the browser.
+   */
+  private blockReleasedListener(): void {
+    if (this.platform !== 'chromium') return;
+    try {
+      Promise.resolve(
+        this.chrome.proxy.settings.set({ value: buildChromiumLockdownValue([]) }),
+      ).catch(() => undefined);
+    } catch {
+      // Same as a set that did not take.
+    }
   }
 
   private onMessage(raw: unknown): void {
