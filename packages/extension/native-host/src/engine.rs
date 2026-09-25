@@ -20,7 +20,7 @@ use zeroize::Zeroizing;
 
 use crate::protocol::{Endpoints, EntryQuery, ExitLocation, ExitQuery, HostState};
 use crate::session::{
-    ConnectOptions, HostBackend, HostError, HostTunnel, Listeners, StateSink, TunnelInit,
+    ConnectOptions, ErrorCode, HostBackend, HostError, HostTunnel, Listeners, StateSink, TunnelInit,
 };
 
 type Client = WarrenClient<warren_sdk::api::ReqwestTransport>;
@@ -38,20 +38,22 @@ pub fn effective_channel(named: Option<Channel>) -> Channel {
 #[must_use]
 pub fn map_client_error(e: &ClientError) -> HostError {
     match e {
-        ClientError::ServerStatus { status, .. } => {
-            HostError::new("server", format!("server returned status {status}"))
-        }
+        ClientError::ServerStatus { status, .. } => HostError::new(
+            ErrorCode::Server,
+            format!("server returned status {status}"),
+        ),
         ClientError::AllHostsBlocked => HostError::new(
-            "all_hosts_blocked",
+            ErrorCode::AllHostsBlocked,
             "all API hosts are unreachable (no network, or the API is blocked)",
         ),
-        ClientError::ResponseEncoding(_) | ClientError::ResponseJson(_) => {
-            HostError::new("response", "the API answered in an unexpected shape")
-        }
+        ClientError::ResponseEncoding(_) | ClientError::ResponseJson(_) => HostError::new(
+            ErrorCode::Response,
+            "the API answered in an unexpected shape",
+        ),
         ClientError::BadClock => {
-            HostError::new("bad_clock", "system clock is before the Unix epoch")
+            HostError::new(ErrorCode::BadClock, "system clock is before the Unix epoch")
         }
-        _ => HostError::new("transport", "the API request failed"),
+        _ => HostError::new(ErrorCode::Transport, "the API request failed"),
     }
 }
 
@@ -62,9 +64,9 @@ pub fn map_client_error(e: &ClientError) -> HostError {
 pub fn map_sdk_error(e: &SdkError) -> HostError {
     match e {
         SdkError::Api(ClientError::ServerStatus { status, .. }) => {
-            HostError::new("api", format!("server returned status {status}"))
+            HostError::new(ErrorCode::Api, format!("server returned status {status}"))
         }
-        SdkError::Api(inner) => HostError::new("api", map_client_error(inner).message),
+        SdkError::Api(inner) => HostError::new(ErrorCode::Api, map_client_error(inner).message),
         SdkError::Discovery(_)
         | SdkError::MultihopDirectory(_)
         | SdkError::Selector(_)
@@ -73,13 +75,15 @@ pub fn map_sdk_error(e: &SdkError) -> HostError {
         | SdkError::RolledBackMultihopDirectory { .. }
         | SdkError::NoMultihopExit
         | SdkError::StaleRelayList
-        | SdkError::RolledBackRelayList { .. } => HostError::new("discovery", e.to_string()),
-        SdkError::ExitDnsDisabled => HostError::new("unsupported", e.to_string()),
+        | SdkError::RolledBackRelayList { .. } => {
+            HostError::new(ErrorCode::Discovery, e.to_string())
+        }
+        SdkError::ExitDnsDisabled => HostError::new(ErrorCode::Unsupported, e.to_string()),
         SdkError::UnknownDaitaMachine { .. }
         | SdkError::EmptyDaitaPool
-        | SdkError::DaitaConfig(_) => HostError::new("config", e.to_string()),
-        SdkError::Build(_) => HostError::new("config", e.to_string()),
-        _ => HostError::new("tunnel", e.to_string()),
+        | SdkError::DaitaConfig(_) => HostError::new(ErrorCode::Config, e.to_string()),
+        SdkError::Build(_) => HostError::new(ErrorCode::Config, e.to_string()),
+        _ => HostError::new(ErrorCode::Tunnel, e.to_string()),
     }
 }
 
@@ -159,7 +163,12 @@ impl EngineBackend {
         channel: Channel,
     ) -> Result<WarrenClientBuilder, HostError> {
         let dir = self.state_root.join(channel.name());
-        let unusable = |_| HostError::new("config", "the helper state directory is not usable");
+        let unusable = |_| {
+            HostError::new(
+                ErrorCode::Config,
+                "the helper state directory is not usable",
+            )
+        };
         std::fs::create_dir_all(&dir).map_err(unusable)?;
         let relay = FileGenerationStore::new(dir.join("relay_generation")).map_err(unusable)?;
         let multihop =
@@ -169,6 +178,7 @@ impl EngineBackend {
             .identity(identity)
             .api_base(channel.api_url())
             .server_pubkey_pin(product::SERVER_PUBKEY_HEX)
+            .multihop_root_pubkey_pin(product::MULTIHOP_ROOT_PUBKEY_HEX)
             .generation_store(Arc::new(relay))
             .multihop_generation_store(Arc::new(multihop))
             .server_key_store(Arc::new(server_key)))
@@ -177,7 +187,7 @@ impl EngineBackend {
 
 fn identity_from(mnemonic: &Zeroizing<String>) -> Result<WarrenIdentity, HostError> {
     WarrenIdentity::from_mnemonic(mnemonic.trim())
-        .map_err(|_| HostError::new("identity", "invalid mnemonic"))
+        .map_err(|_| HostError::new(ErrorCode::Identity, "invalid mnemonic"))
 }
 
 fn build(builder: WarrenClientBuilder) -> Result<Client, HostError> {
@@ -251,9 +261,10 @@ pub struct EngineTunnel {
 }
 
 impl EngineTunnel {
-    /// The directory exits also vouched for by the pinned relay list: the
-    /// engine's anti-mint guard, so a compromised online key alone cannot
-    /// mint an exit this helper dials.
+    /// The directory exits the relay list also carries, as the napi binding
+    /// resolves them. Both lists are signed by the same online key, so what
+    /// stops that key alone from minting an exit is the directory's pinned
+    /// offline root (`MULTIHOP_ROOT_PUBKEY_HEX`, set in [`EngineBackend`]).
     async fn cross_checked_exits(&self) -> Result<Vec<VerifiedExit>, HostError> {
         let selector = self
             .client
@@ -315,7 +326,10 @@ impl HostTunnel for EngineTunnel {
             .into_iter()
             .find(|e| exit_matches(e, &query))
             .ok_or_else(|| {
-                HostError::new("discovery", "no cross-checked exit matched the selector")
+                HostError::new(
+                    ErrorCode::Discovery,
+                    "no cross-checked exit matched the selector",
+                )
             })?;
         if let Some(entry_query) = options.entry_selector {
             let (entries, policy) = self.cross_checked_entries().await?;
@@ -330,7 +344,7 @@ impl HostTunnel for EngineTunnel {
             )
             .ok_or_else(|| {
                 HostError::new(
-                    "discovery",
+                    ErrorCode::Discovery,
                     "no cross-checked entry satisfied the entry selector and the circuit \
                      diversity policy (distinct node, different country/AS)",
                 )
@@ -506,17 +520,17 @@ mod tests {
         let mapped = map_client_error(&status);
         assert_eq!(
             mapped,
-            HostError::new("server", "server returned status 402")
+            HostError::new(ErrorCode::Server, "server returned status 402")
         );
         let transport = ClientError::Transport(TransportError::Connect(
             "error sending request to 203.0.113.9".into(),
         ));
         let mapped = map_client_error(&transport);
-        assert_eq!(mapped.code, "transport");
+        assert_eq!(mapped.code, ErrorCode::Transport);
         assert!(!mapped.message.contains("203.0.113.9"));
         assert_eq!(
             map_client_error(&ClientError::AllHostsBlocked).code,
-            "all_hosts_blocked"
+            ErrorCode::AllHostsBlocked
         );
     }
 
@@ -526,13 +540,22 @@ mod tests {
             status: 403,
             body: "wb5Fsecret".into(),
         }));
-        assert_eq!(api, HostError::new("api", "server returned status 403"));
-        assert_eq!(map_sdk_error(&SdkError::StaleRelayList).code, "discovery");
+        assert_eq!(
+            api,
+            HostError::new(ErrorCode::Api, "server returned status 403")
+        );
+        assert_eq!(
+            map_sdk_error(&SdkError::StaleRelayList).code,
+            ErrorCode::Discovery
+        );
         assert_eq!(
             map_sdk_error(&SdkError::ExitDnsDisabled).code,
-            "unsupported"
+            ErrorCode::Unsupported
         );
-        assert_eq!(map_sdk_error(&SdkError::EmptyDaitaPool).code, "config");
+        assert_eq!(
+            map_sdk_error(&SdkError::EmptyDaitaPool).code,
+            ErrorCode::Config
+        );
     }
 
     #[test]
@@ -570,12 +593,12 @@ mod tests {
             .await;
         assert_eq!(
             result.err(),
-            Some(HostError::new("identity", "invalid mnemonic"))
+            Some(HostError::new(ErrorCode::Identity, "invalid mnemonic"))
         );
         let account = backend
             .account_expiry(Zeroizing::new("still not one".into()), None)
             .await;
-        assert_eq!(account.err().map(|e| e.code), Some("identity".to_owned()));
+        assert_eq!(account.err().map(|e| e.code), Some(ErrorCode::Identity));
     }
 
     #[tokio::test]

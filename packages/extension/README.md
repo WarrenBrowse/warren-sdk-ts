@@ -219,8 +219,9 @@ warren-host install --extension-id <chromium id> --gecko-id <id@domain>
 
 The API it reaches is the one of the channel the extension names at `hello`;
 a `hello` without a channel gets the build's own (`WARREN_PRODUCT_ENV` at
-compile time, prod by default). Anti-rollback floors persist per channel under
-the helper's `state/` directory. The mnemonic arrives in a `connect` or
+compile time, prod by default). It pins the server key and the multihop
+directory's offline root from the engine's product anchors, and keeps the
+anti-rollback floors per channel under the helper's `state/` directory. The mnemonic arrives in a `connect` or
 `account` request, is used and wiped, and is never stored or logged.
 
 ### Building the helper

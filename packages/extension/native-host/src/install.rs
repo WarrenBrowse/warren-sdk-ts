@@ -57,8 +57,17 @@ pub enum InstallError {
         source: std::io::Error,
     },
     /// The Windows registry refused a write.
-    #[error("cannot register the helper under HKCU\\{0}")]
-    Registry(String),
+    #[error("cannot register the helper under HKCU\\{key}")]
+    Registry {
+        /// The key under `HKCU`.
+        key: String,
+        /// Why `reg.exe` failed.
+        #[source]
+        source: std::io::Error,
+    },
+    /// A manifest or the id record could not be serialized.
+    #[error("cannot serialize the helper's configuration")]
+    Encode(#[source] serde_json::Error),
     /// An id given on the command line is malformed.
     #[error("{0} is not a valid extension id")]
     BadId(String),
@@ -495,7 +504,7 @@ pub fn install(
     let record = ExtraIds::load(&record_path).merged(extra);
     write_file(
         &record_path,
-        &serde_json::to_vec_pretty(&record).unwrap_or_default(),
+        &serde_json::to_vec_pretty(&record).map_err(InstallError::Encode)?,
     )?;
     let allow = Allowlist::new(BUILD_CHANNEL, &record);
 
@@ -503,10 +512,13 @@ pub fn install(
     for browser in &targets {
         let file = browser.manifest_file(platform);
         let body = serde_json::to_vec_pretty(&manifest(browser.family, &binary, &allow))
-            .unwrap_or_default();
+            .map_err(InstallError::Encode)?;
         write_file(&file, &body)?;
         if let Registration::RegistryKey(key) = &browser.registration {
-            registry::set_default(key, &file).map_err(|_| InstallError::Registry(key.clone()))?;
+            registry::set_default(key, &file).map_err(|source| InstallError::Registry {
+                key: key.clone(),
+                source,
+            })?;
         }
     }
     Ok(InstallReport {
@@ -542,6 +554,7 @@ pub fn uninstall(platform: &Platform) -> UninstallReport {
         }
     }
     let dir = platform.helper_dir();
+    move_out_running_binary(&dir);
     if dir.exists() {
         match std::fs::remove_dir_all(&dir) {
             Ok(()) => report.removed.push(dir),
@@ -549,6 +562,32 @@ pub fn uninstall(platform: &Platform) -> UninstallReport {
         }
     }
     report
+}
+
+/// Windows cannot delete a running executable, so an uninstall run by the
+/// installed helper itself would fail on its own binary. It can move it,
+/// though: out of the helper directory into the temporary directory, which
+/// the system cleans.
+fn move_out_running_binary(dir: &Path) {
+    #[cfg(windows)]
+    {
+        let Ok(exe) = std::env::current_exe() else {
+            return;
+        };
+        let inside = match (std::fs::canonicalize(&exe), std::fs::canonicalize(dir)) {
+            (Ok(exe), Ok(dir)) => exe.starts_with(dir),
+            _ => false,
+        };
+        if inside {
+            let parked = std::env::temp_dir().join(format!(
+                "warren-host-uninstalled-{}.exe",
+                std::process::id()
+            ));
+            let _ = std::fs::rename(&exe, parked);
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = dir;
 }
 
 /// Whether each known browser has the manifest.
@@ -592,7 +631,8 @@ fn same_file(a: &Path, b: &Path) -> bool {
 }
 
 /// Copies `source` to `target` atomically: a browser starting the helper in
-/// the middle of an update gets the old binary or the new one, never half.
+/// the middle of an update gets the old binary or the new one, never half,
+/// and a failed update leaves the old one in place.
 fn place_binary(source: &Path, target: &Path) -> Result<(), InstallError> {
     if same_file(source, target) {
         return Ok(());
@@ -600,25 +640,39 @@ fn place_binary(source: &Path, target: &Path) -> Result<(), InstallError> {
     let dir = target.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir).map_err(io_err("create", dir))?;
     let tmp = sibling(target, "new");
-    std::fs::copy(source, &tmp).map_err(io_err("copy the helper to", &tmp))?;
+    let staged = stage_copy(source, &tmp);
+    if staged.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    staged?;
+    // A running executable cannot be replaced on Windows, but it can be
+    // renamed: move the old one aside and sweep it on a later install.
+    let aside = sibling(target, "old");
+    let moved_aside = cfg!(windows) && target.exists();
+    if moved_aside && let Err(e) = std::fs::rename(target, &aside) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(io_err("move aside", target)(e));
+    }
+    if let Err(e) = std::fs::rename(&tmp, target) {
+        let _ = std::fs::remove_file(&tmp);
+        if moved_aside {
+            let _ = std::fs::rename(&aside, target);
+        }
+        return Err(io_err("install", target)(e));
+    }
+    clear_download_marks(target);
+    sweep_leftovers(dir);
+    Ok(())
+}
+
+fn stage_copy(source: &Path, tmp: &Path) -> Result<(), InstallError> {
+    std::fs::copy(source, tmp).map_err(io_err("copy the helper to", tmp))?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755))
-            .map_err(io_err("set permissions on", &tmp))?;
+        std::fs::set_permissions(tmp, std::fs::Permissions::from_mode(0o755))
+            .map_err(io_err("set permissions on", tmp))?;
     }
-    #[cfg(windows)]
-    {
-        // A running executable cannot be replaced, but it can be renamed:
-        // move the old one aside and sweep it on a later install.
-        if target.exists() {
-            let aside = sibling(target, "old");
-            std::fs::rename(target, &aside).map_err(io_err("move aside", target))?;
-        }
-    }
-    std::fs::rename(&tmp, target).map_err(io_err("install", target))?;
-    clear_download_marks(target);
-    sweep_leftovers(dir);
     Ok(())
 }
 
@@ -643,14 +697,28 @@ fn clear_download_marks(path: &Path) {
     let _ = path;
 }
 
-/// Removes binaries moved aside by earlier updates, once nothing runs them.
+/// Removes binaries moved aside by earlier updates once nothing runs them,
+/// and the staging files of an install that was interrupted (old enough that
+/// no install still in progress can own them).
 fn sweep_leftovers(dir: &Path) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    let stale = |entry: &std::fs::DirEntry| {
+        entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age > std::time::Duration::from_secs(600))
+    };
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(".warren-host") && name.contains(".old-") {
+        if !name.starts_with('.') {
+            continue;
+        }
+        let staging = name.contains(".new-") || name.contains(".tmp-");
+        if name.contains(".old-") || (staging && stale(&entry)) {
             let _ = std::fs::remove_file(entry.path());
         }
     }

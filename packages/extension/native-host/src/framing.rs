@@ -26,15 +26,19 @@ pub enum FrameError {
     /// The stream could not be read.
     #[error("native messaging stream is unreadable")]
     Io(#[source] std::io::Error),
+    /// The message could not be serialized.
+    #[error("the message cannot be serialized")]
+    Encode(#[source] serde_json::Error),
 }
 
 /// Encodes one message. A message at or above the outbound cap is refused.
 ///
 /// # Errors
 ///
-/// [`FrameError::TooLarge`] when the JSON reaches [`MAX_OUTBOUND_BYTES`].
+/// [`FrameError::TooLarge`] when the JSON reaches [`MAX_OUTBOUND_BYTES`],
+/// [`FrameError::Encode`] when it cannot be serialized.
 pub fn encode_frame(message: &Value) -> Result<Vec<u8>, FrameError> {
-    let json = serde_json::to_vec(message).map_err(|e| FrameError::Io(e.into()))?;
+    let json = serde_json::to_vec(message).map_err(FrameError::Encode)?;
     if json.len() >= MAX_OUTBOUND_BYTES {
         return Err(FrameError::TooLarge(json.len()));
     }

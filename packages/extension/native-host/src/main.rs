@@ -107,26 +107,49 @@ fn run_host(caller: &Caller) -> ExitCode {
     }
 }
 
+/// Resolves when the process is asked to stop. A handler that cannot be
+/// registered never resolves: the helper then lives until the browser closes
+/// the pipe, rather than stopping at launch.
 async fn stop_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
-        match signal(SignalKind::terminate()) {
-            Ok(mut term) => {
-                tokio::select! {
-                    _ = tokio::signal::ctrl_c() => {}
-                    _ = term.recv() => {}
+        let terminate = async {
+            match signal(SignalKind::terminate()) {
+                Ok(mut term) => {
+                    term.recv().await;
                 }
+                Err(_) => std::future::pending::<()>().await,
             }
-            Err(_) => {
-                let _ = tokio::signal::ctrl_c().await;
+        };
+        let interrupt = async {
+            if tokio::signal::ctrl_c().await.is_err() {
+                std::future::pending::<()>().await;
             }
+        };
+        tokio::select! {
+            () = terminate => {}
+            () = interrupt => {}
         }
     }
     #[cfg(not(unix))]
     {
-        let _ = tokio::signal::ctrl_c().await;
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
     }
+}
+
+/// `error` and every cause under it, for a person reading a terminal.
+fn describe(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 fn run_install(extra: &ExtraIds, interactive: bool) -> ExitCode {
@@ -157,7 +180,7 @@ fn run_install(extra: &ExtraIds, interactive: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(e) => {
-            eprintln!("warren-host: installation failed: {e}");
+            eprintln!("warren-host: installation failed: {}", describe(&e));
             ExitCode::from(1)
         }
     }

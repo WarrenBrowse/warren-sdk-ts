@@ -14,21 +14,77 @@ use crate::protocol::{
     PROTOCOL_VERSION, Request,
 };
 
+/// The stable codes an error answer carries, spelled as the Node host spells
+/// them (its session, the napi kinds and `WarrenApiError`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorCode {
+    /// A request this helper cannot serve, or a peer on another protocol.
+    Protocol,
+    /// A tunnel is already up or coming up.
+    AlreadyConnected,
+    /// The datapath failed.
+    Tunnel,
+    /// The API refused or failed a tunnel's control-plane call.
+    Api,
+    /// The relay list or the multihop directory did not verify or match.
+    Discovery,
+    /// A local configuration problem (state directory, DAITA, client build).
+    Config,
+    /// The chosen exit cannot serve this request.
+    Unsupported,
+    /// The mnemonic is not a valid phrase.
+    Identity,
+    /// The API answered with a non-2xx status.
+    Server,
+    /// The API request failed on the network.
+    Transport,
+    /// No API host was reachable.
+    AllHostsBlocked,
+    /// The API answered in an unexpected shape.
+    Response,
+    /// The system clock is before the Unix epoch.
+    BadClock,
+}
+
+impl ErrorCode {
+    /// The wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Protocol => "protocol",
+            Self::AlreadyConnected => "already_connected",
+            Self::Tunnel => "tunnel",
+            Self::Api => "api",
+            Self::Discovery => "discovery",
+            Self::Config => "config",
+            Self::Unsupported => "unsupported",
+            Self::Identity => "identity",
+            Self::Server => "server",
+            Self::Transport => "transport",
+            Self::AllHostsBlocked => "all_hosts_blocked",
+            Self::Response => "response",
+            Self::BadClock => "bad_clock",
+        }
+    }
+}
+
 /// A failure answered to the extension: a stable code it can dispatch on and
 /// a message that carries no identity material.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{}: {message}", code.as_str())]
 pub struct HostError {
-    /// Machine-readable code (`tunnel`, `api`, `discovery`, `protocol`, ...).
-    pub code: String,
+    /// Machine-readable code.
+    pub code: ErrorCode,
     /// Redacted, human-readable message.
     pub message: String,
 }
 
 impl HostError {
     /// Builds an error from a code and an already redacted message.
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
-            code: code.into(),
+            code,
             message: message.into(),
         }
     }
@@ -171,17 +227,17 @@ impl<B: HostBackend> HostSession<B> {
                 let channel = lock(&self.inner).channel;
                 match self.backend.list_exits(channel).await {
                     Ok(locations) => self.send(protocol::exits_answer(&id, &locations)),
-                    Err(e) => self.fail(&id, &e.code, &e.message),
+                    Err(e) => self.fail(&id, e.code, &e.message),
                 }
             }
             Request::Account { mnemonic } => {
                 let channel = lock(&self.inner).channel;
                 match self.backend.account_expiry(mnemonic, channel).await {
                     Ok(expires_at) => self.send(protocol::account_answer(&id, expires_at)),
-                    Err(e) => self.fail(&id, &e.code, &e.message),
+                    Err(e) => self.fail(&id, e.code, &e.message),
                 }
             }
-            Request::Refused(reason) => self.fail(&id, "protocol", reason),
+            Request::Refused(reason) => self.fail(&id, ErrorCode::Protocol, reason),
         }
     }
 
@@ -199,13 +255,13 @@ impl<B: HostBackend> HostSession<B> {
             .and_then(Value::as_f64)
             .is_some_and(|v| v == PROTOCOL_VERSION as f64);
         if !speaks_ours {
-            return self.fail(id, "protocol", "unsupported protocol version");
+            return self.fail(id, ErrorCode::Protocol, "unsupported protocol version");
         }
         let channel = match channel {
             None => None,
             Some(value) => match value.as_str().and_then(protocol::parse_channel) {
                 Some(channel) => Some(channel),
-                None => return self.fail(id, "protocol", "unknown release channel"),
+                None => return self.fail(id, ErrorCode::Protocol, "unknown release channel"),
             },
         };
         lock(&self.inner).channel = channel;
@@ -217,11 +273,11 @@ impl<B: HostBackend> HostSession<B> {
             let mut inner = lock(&self.inner);
             if inner.closed {
                 drop(inner);
-                return self.fail(id, "tunnel", "the helper is shutting down");
+                return self.fail(id, ErrorCode::Tunnel, "the helper is shutting down");
             }
             if inner.connecting || inner.tunnel.is_some() {
                 drop(inner);
-                return self.fail(id, "already_connected", "a session is already up");
+                return self.fail(id, ErrorCode::AlreadyConnected, "a session is already up");
             }
             inner.connecting = true;
             inner.generation += 1;
@@ -251,7 +307,10 @@ impl<B: HostBackend> HostSession<B> {
                 Err(e) => Err((Some(tunnel), e)),
                 Ok(l) if l.username.is_empty() || l.password.is_empty() => Err((
                     Some(tunnel),
-                    HostError::new("protocol", "the tunnel reported no listener credentials"),
+                    HostError::new(
+                        ErrorCode::Protocol,
+                        "the tunnel reported no listener credentials",
+                    ),
                 )),
                 Ok(listeners) => Ok((tunnel, listeners)),
             },
@@ -282,16 +341,23 @@ impl<B: HostBackend> HostSession<B> {
                 // tunnel was being built: it must not outlive that.
                 Ok((tunnel, _)) => (
                     Some(tunnel),
-                    protocol::error_answer(id, "tunnel", "disconnected while connecting"),
+                    protocol::error_answer(
+                        id,
+                        ErrorCode::Tunnel.as_str(),
+                        "disconnected while connecting",
+                    ),
                 ),
                 // Fail-closed: never leave a half-built tunnel running.
                 Err((tunnel, error)) => {
                     if current {
+                        // The failed tunnel's reporter may still be running
+                        // until it is shut down below: silence it now.
+                        inner.generation += 1;
                         inner.state = HostState::Disconnected;
                     }
                     (
                         tunnel,
-                        protocol::error_answer(id, &error.code, &error.message),
+                        protocol::error_answer(id, error.code.as_str(), &error.message),
                     )
                 }
             }
@@ -311,7 +377,9 @@ impl<B: HostBackend> HostSession<B> {
                 return;
             }
             guard.state = state;
-            drop(guard);
+            // Queued under the lock: a teardown bumps the generation under
+            // it too, so no event can follow the answer that reported the
+            // tunnel gone. The outbox only enqueues, it never blocks.
             outbox(protocol::state_event(state));
         })
     }
@@ -333,8 +401,8 @@ impl<B: HostBackend> HostSession<B> {
         (self.outbox)(message);
     }
 
-    fn fail(&self, id: &Value, code: &str, message: &str) {
-        self.send(protocol::error_answer(id, code, message));
+    fn fail(&self, id: &Value, code: ErrorCode, message: &str) {
+        self.send(protocol::error_answer(id, code.as_str(), message));
     }
 }
 
@@ -607,7 +675,7 @@ mod tests {
     #[tokio::test]
     async fn maps_a_tunnel_failure_to_its_code_and_tears_the_tunnel_down() {
         let h = Harness::new(Fake {
-            connect_error: Some(HostError::new("api", "server returned status 402")),
+            connect_error: Some(HostError::new(ErrorCode::Api, "server returned status 402")),
             ..Fake::default()
         });
         h.send(connect(3)).await;
@@ -621,7 +689,7 @@ mod tests {
     #[tokio::test]
     async fn keeps_the_code_of_a_tunnel_that_could_not_be_built() {
         let h = Harness::new(Fake {
-            create_error: Some(HostError::new("identity", "invalid mnemonic")),
+            create_error: Some(HostError::new(ErrorCode::Identity, "invalid mnemonic")),
             ..Fake::default()
         });
         h.send(connect(1)).await;
@@ -727,7 +795,10 @@ mod tests {
     #[tokio::test]
     async fn maps_an_exits_failure_to_a_typed_error() {
         let h = Harness::new(Fake {
-            exits: Some(Err(HostError::new("discovery", "relay list expired"))),
+            exits: Some(Err(HostError::new(
+                ErrorCode::Discovery,
+                "relay list expired",
+            ))),
             ..Fake::default()
         });
         h.send(json!({ "id": 8, "type": "exits" })).await;
@@ -752,7 +823,10 @@ mod tests {
     #[tokio::test]
     async fn maps_an_account_failure_to_a_typed_error() {
         let h = Harness::new(Fake {
-            account: Some(Err(HostError::new("server", "server returned status 404"))),
+            account: Some(Err(HostError::new(
+                ErrorCode::Server,
+                "server returned status 404",
+            ))),
             ..Fake::default()
         });
         h.send(json!({ "id": 11, "type": "account", "mnemonic": M }))
@@ -800,6 +874,21 @@ mod tests {
         gate.notify_one();
         h.send(connect(4)).await;
         assert_eq!(h.last()["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn drops_state_events_from_a_tunnel_whose_connect_failed() {
+        let h = Harness::new(Fake {
+            password: Some(String::new()),
+            ..Fake::default()
+        });
+        h.send(connect(1)).await;
+        let stale = Arc::clone(&lock(&h.seen.sinks)[0]);
+        let before = h.sent().len();
+        stale(HostState::Reconnecting);
+        assert_eq!(h.sent().len(), before);
+        h.send(json!({ "id": 2, "type": "status" })).await;
+        assert_eq!(h.last()["state"], "disconnected");
     }
 
     #[tokio::test]

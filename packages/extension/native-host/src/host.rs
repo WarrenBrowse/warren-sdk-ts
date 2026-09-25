@@ -123,6 +123,7 @@ mod tests {
 
     use serde_json::json;
     use tokio::io::{AsyncReadExt, DuplexStream};
+    use tokio::sync::Notify;
     use warren_sdk::product::Channel;
 
     use super::*;
@@ -133,12 +134,24 @@ mod tests {
     struct Fake {
         shutdowns: Arc<AtomicUsize>,
         mnemonics: Arc<Mutex<Vec<String>>>,
+        /// When set, a connect announces itself on `dialing` and then waits
+        /// for this before it lands.
+        gate: Option<Arc<Notify>>,
+        dialing: Arc<Notify>,
     }
 
-    struct FakeTunnel(Arc<AtomicUsize>);
+    struct FakeTunnel {
+        shutdowns: Arc<AtomicUsize>,
+        gate: Option<Arc<Notify>>,
+        dialing: Arc<Notify>,
+    }
 
     impl HostTunnel for FakeTunnel {
         async fn connect(&mut self, _options: ConnectOptions) -> Result<Listeners, HostError> {
+            if let Some(gate) = &self.gate {
+                self.dialing.notify_one();
+                gate.notified().await;
+            }
             Ok(Listeners {
                 endpoints: Endpoints {
                     socks5: "127.0.0.1:1080".into(),
@@ -150,7 +163,7 @@ mod tests {
         }
 
         async fn shutdown(self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
+            self.shutdowns.fetch_add(1, Ordering::SeqCst);
         }
     }
 
@@ -164,7 +177,11 @@ mod tests {
             _init: TunnelInit,
         ) -> Result<FakeTunnel, HostError> {
             self.mnemonics.lock().unwrap().push(mnemonic.to_string());
-            Ok(FakeTunnel(Arc::clone(&self.shutdowns)))
+            Ok(FakeTunnel {
+                shutdowns: Arc::clone(&self.shutdowns),
+                gate: self.gate.clone(),
+                dialing: Arc::clone(&self.dialing),
+            })
         }
 
         async fn list_exits(&self, _: Option<Channel>) -> Result<Vec<ExitLocation>, HostError> {
@@ -271,6 +288,34 @@ mod tests {
             bad.extend_from_slice(b"{nope");
             to_host.write_all(&bad).await.unwrap();
             assert_eq!(task.await.unwrap(), HostExit::CorruptStream);
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_connect_still_dialing_when_the_browser_leaves_never_stays_up() {
+        run_local(async {
+            let gate = Arc::new(Notify::new());
+            let fake = Fake {
+                gate: Some(Arc::clone(&gate)),
+                ..Fake::default()
+            };
+            let (mut to_host, from_host, task) = start(fake.clone(), std::future::pending());
+            to_host
+                .write_all(&frame(
+                    &json!({ "id": 1, "type": "connect", "mnemonic": "m" }),
+                ))
+                .await
+                .unwrap();
+            fake.dialing.notified().await;
+            drop(to_host);
+            // Let the loop see the end of stream and close the session before
+            // the tunnel lands.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            gate.notify_one();
+            assert_eq!(task.await.unwrap(), HostExit::EndOfStream);
+            assert_eq!(fake.shutdowns.load(Ordering::SeqCst), 1);
+            drop(from_host);
         })
         .await;
     }
