@@ -11,3 +11,8 @@ packages/extension/example/sdk-extension.js
 
 # stray CLI-arg artifacts
 /--help
+
+# The helper crate's local engine override (see native-host/README.md) and
+# any in-tree cargo output.
+packages/extension/native-host/.cargo/
+packages/extension/native-host/target/

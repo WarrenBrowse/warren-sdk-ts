@@ -1,0 +1,66 @@
+name: Engine siblings for the helper
+description: >
+  Checks out the private engine repositories the helper crate
+  (packages/extension/native-host) compiles against, as siblings of this
+  repository's checkout: warren-sdk-rs at the rev its Cargo.toml pins, and
+  warrenguard and warren-contract at the revs that commit names in its
+  `.warrenguard-version` and `.warren-contract-version`. Then it points the
+  crate at the checked-out warren-sdk-rs through the same gitignored override a
+  developer uses, so cargo never fetches a private repository itself. Expects
+  this repository checked out at `sdk-ts` under the workspace.
+inputs:
+  token:
+    description: ENGINE_TOKEN, contents:read on warren-sdk-rs, warrenguard and warren-contract.
+    required: true
+outputs:
+  sdk:
+    description: The pinned warren-sdk-rs commit.
+    value: ${{ steps.pin.outputs.sdk }}
+runs:
+  using: composite
+  steps:
+    - name: Engine rev from the pin
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        rev="$(sed -n -E 's/^warren-sdk = \{ git = "https:\/\/github.com\/WarrenBrowse\/warren-sdk-rs.git", rev = "([0-9a-f]{40})" \}$/\1/p' sdk-ts/packages/extension/native-host/Cargo.toml)"
+        test -n "$rev" || { echo "::error::no warren-sdk rev pin in native-host/Cargo.toml"; exit 1; }
+        napi="$(sed -n -E 's/^warren-sdk = \{ git = "https:\/\/github.com\/WarrenBrowse\/warren-sdk-rs.git", rev = "([0-9a-f]{40})" \}$/\1/p' sdk-ts/packages/node/native/warren-napi/Cargo.toml)"
+        # One engine for both hosts: the helper and the Node addon pin the
+        # same warren-sdk-rs commit.
+        test "$rev" = "$napi" || { echo "::error::native-host pins $rev but warren-napi pins $napi"; exit 1; }
+        echo "sdk=$rev" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@v4
+      with:
+        repository: WarrenBrowse/warren-sdk-rs
+        ref: ${{ steps.pin.outputs.sdk }}
+        token: ${{ inputs.token }}
+        path: warren-sdk-rs
+    - name: Sibling revs the pinned engine names
+      id: siblings
+      shell: bash
+      run: |
+        set -euo pipefail
+        echo "warrenguard=$(tr -d '[:space:]' < warren-sdk-rs/.warrenguard-version)" >> "$GITHUB_OUTPUT"
+        echo "contract=$(tr -d '[:space:]' < warren-sdk-rs/.warren-contract-version)" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@v4
+      with:
+        repository: WarrenBrowse/warrenguard
+        ref: ${{ steps.siblings.outputs.warrenguard }}
+        token: ${{ inputs.token }}
+        path: warrenguard
+    - uses: actions/checkout@v4
+      with:
+        repository: WarrenBrowse/warren-contract
+        ref: ${{ steps.siblings.outputs.contract }}
+        token: ${{ inputs.token }}
+        path: warren-contract
+    - name: Point the crate at the checked-out engine
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p sdk-ts/packages/extension/native-host/.cargo
+        printf '%s\n' '[patch."https://github.com/WarrenBrowse/warren-sdk-rs.git"]' \
+          'warren-sdk = { path = "../../../../warren-sdk-rs/crates/warren-sdk" }' \
+          > sdk-ts/packages/extension/native-host/.cargo/config.toml

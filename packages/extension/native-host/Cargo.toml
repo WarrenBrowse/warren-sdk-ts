@@ -1,0 +1,76 @@
+[package]
+name = "warren-native-host"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.91"
+license = "AGPL-3.0-or-later"
+description = "The Warren browser extension's helper: a native messaging host that carries the multi-hop datapath, installs itself per user, and needs no runtime."
+publish = false
+
+[lib]
+name = "warren_native_host"
+path = "src/lib.rs"
+
+[[bin]]
+name = "warren-host"
+path = "src/main.rs"
+
+[dependencies]
+# The Warren engine, pinned by commit to the same warren-sdk-rs revision as the
+# napi binding (packages/node/native/warren-napi/Cargo.toml), so the helper and
+# the Node host carry one engine. Local builds and CI resolve it from a
+# checkout through the gitignored override described in
+# packages/extension/README.md ("Building the helper").
+warren-sdk = { git = "https://github.com/WarrenBrowse/warren-sdk-rs.git", rev = "c3b453881fcb31d7f120d1fbc7946effa2e28158" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal", "sync", "time"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+zeroize = { version = "1", features = ["serde"] }
+hex = "0.4"
+thiserror = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "deny", priority = -1 }
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+
+[profile.release]
+# One small self-contained binary users download: strip symbols and let the
+# linker drop what is unused.
+strip = true
+lto = "thin"
+codegen-units = 4
+
+# Mirror of warren-sdk-rs's workspace `[patch]` table, as in warren-napi: the
+# engine and contract crates resolve from sibling checkouts four levels up,
+# which must sit at the revs the pinned warren-sdk-rs names in its
+# `.warrenguard-version` and `.warren-contract-version`. Keep in lockstep with
+# packages/node/native/warren-napi/Cargo.toml.
+[patch."https://github.com/WarrenBrowse/warrenguard.git"]
+warrenguard-wire = { path = "../../../../warrenguard/crates/warrenguard-wire" }
+warrenguard-identity = { path = "../../../../warrenguard/crates/warrenguard-identity" }
+warrenguard-multihop = { path = "../../../../warrenguard/crates/warrenguard-multihop" }
+warrenguard-daita = { path = "../../../../warrenguard/crates/warrenguard-daita" }
+warrenguard-tls = { path = "../../../../warrenguard/crates/warrenguard-tls" }
+warrenguard-tcp-fallback = { path = "../../../../warrenguard/crates/warrenguard-tcp-fallback" }
+warrenguard-natpmp-protocol = { path = "../../../../warrenguard/crates/warrenguard-natpmp-protocol" }
+warrenguard-tun-core = { path = "../../../../warrenguard/crates/warrenguard-tun-core" }
+warrenguard-tun-device = { path = "../../../../warrenguard/crates/warrenguard-tun-device" }
+warrenguard-backoff = { path = "../../../../warrenguard/crates/warrenguard-backoff" }
+warrenguard-token = { path = "../../../../warrenguard/crates/warrenguard-token" }
+warrenguard-socket-bypass = { path = "../../../../warrenguard/crates/warrenguard-socket-bypass" }
+warrenguard-transport = { path = "../../../../warrenguard/crates/warrenguard-transport" }
+warrenguard-transport-core = { path = "../../../../warrenguard/crates/warrenguard-transport-core" }
+warrenguard-config = { path = "../../../../warrenguard/crates/warrenguard-config" }
+warrenguard-pump = { path = "../../../../warrenguard/crates/warrenguard-pump" }
+
+[patch."https://github.com/WarrenBrowse/warren-contract.git"]
+warren-contract = { path = "../../../../warren-contract" }
+warren-discovery-core = { path = "../../../../warren-contract/warren-discovery" }

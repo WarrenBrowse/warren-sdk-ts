@@ -24,6 +24,11 @@ name: CI
 # depends on the private engine crates (warren-sdk-rs + warrenguard) via sibling
 # path deps, which a fresh CI checkout cannot reproduce. It is built locally and
 # at release time (see packages/node/native/README.md).
+#
+# The extension's helper (packages/extension/native-host) IS gated here, in the
+# `native-host` job: it checks the engine repos out as siblings with
+# ENGINE_TOKEN (.github/actions/engine-siblings), and release-host.yml refuses
+# to publish a commit this workflow has not passed.
 
 on:
   push:
@@ -145,3 +150,34 @@ jobs:
       - run: pnpm build
       - name: Coverage (vitest v8, thresholds enforced)
         run: pnpm coverage
+
+  native-host:
+    name: native-host (rust)
+    # Self-hosted runners must never execute fork code: only same-repo events
+    # reach this job (it also holds ENGINE_TOKEN).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 60
+    steps:
+      - name: Reset stale workspace
+        shell: bash
+        run: rm -rf .git sdk-ts warren-sdk-rs warrenguard warren-contract 2>/dev/null || true
+      - uses: actions/checkout@v4
+        with:
+          path: sdk-ts
+      - uses: ./sdk-ts/.github/actions/engine-siblings
+        with:
+          token: ${{ secrets.ENGINE_TOKEN }}
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          components: rustfmt, clippy
+      - name: fmt, clippy, test
+        shell: bash
+        working-directory: sdk-ts/packages/extension/native-host
+        run: |
+          set -euo pipefail
+          # Persistent cache outside _work, apart from the release lanes'.
+          export CARGO_TARGET_DIR="$HOME/warren-host-target-ci"
+          cargo fmt --check
+          cargo clippy --locked --all-targets -- -D warnings
+          cargo test --locked
