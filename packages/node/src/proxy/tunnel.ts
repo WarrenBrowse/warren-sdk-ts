@@ -151,7 +151,8 @@ export type ProxyFatalCause =
 /**
  * Stable error codes carried by {@link WarrenProxyError}. The native codes
  * mirror the sibling SDKs' sealed error hierarchy; `unavailable` is the
- * TS-side "addon missing / failed to load" case.
+ * TS-side "addon missing / failed to load" case, and `outdated` an addon built
+ * from another SDK than this facade (see {@link NATIVE_BINDING_ABI}).
  */
 export type WarrenProxyErrorCode =
   | 'identity'
@@ -161,7 +162,8 @@ export type WarrenProxyErrorCode =
   | 'config'
   | 'egress'
   | 'unsupported'
-  | 'unavailable';
+  | 'unavailable'
+  | 'outdated';
 
 const NATIVE_CODES: readonly WarrenProxyErrorCode[] = [
   'identity',
@@ -229,6 +231,7 @@ export interface NativeWarrenProxy {
   ): Promise<NativeForwardedPort>;
 }
 interface NativeBinding {
+  bindingAbi(): number;
   WarrenProxy: new (
     mnemonic: string,
     apiBase: string,
@@ -245,15 +248,41 @@ const NATIVE_CANDIDATES = [
   join(here, '..', '..', 'native', 'warren-napi', 'index.cjs'),
 ];
 
+/**
+ * The binding JS surface this facade reads, which the addon reports through
+ * `bindingAbi()` (`BINDING_ABI` in `native/warren-napi/src/lib.rs`). Bump both
+ * together whenever a field the facade reads changes.
+ */
+export const NATIVE_BINDING_ABI = 1;
+
+/** Whether the native datapath can carry a tunnel: built and matching this facade. */
+export type ProxyDatapathStatus = 'ready' | 'missing' | 'outdated';
+
+/**
+ * Reads a loaded binding against {@link NATIVE_BINDING_ABI}. The addon is built
+ * outside `pnpm build`, so a checkout can hold one from an older SDK, whose
+ * objects lack fields this facade relies on: that is `outdated`, and so is an
+ * addon that predates the ABI report altogether.
+ */
+export function nativeBindingStatus(binding: unknown): Exclude<ProxyDatapathStatus, 'missing'> {
+  const report = (binding as { bindingAbi?: unknown } | null)?.bindingAbi;
+  return typeof report === 'function' && report() === NATIVE_BINDING_ABI ? 'ready' : 'outdated';
+}
+
 let cachedBinding: NativeBinding | undefined;
 
 /** Whether the native datapath addon actually loads on this platform/build. */
 export function isProxyDatapathAvailable(): boolean {
+  return proxyDatapathStatus() === 'ready';
+}
+
+/** Whether the native datapath addon is built, and built from this SDK. */
+export function proxyDatapathStatus(): ProxyDatapathStatus {
   try {
     loadNative();
-    return true;
-  } catch {
-    return false;
+    return 'ready';
+  } catch (error) {
+    return error instanceof WarrenProxyError && error.code === 'outdated' ? 'outdated' : 'missing';
   }
 }
 
@@ -262,14 +291,22 @@ function loadNative(): NativeBinding {
   const require = createRequire(import.meta.url);
   for (const path of NATIVE_CANDIDATES) {
     if (existsSync(path)) {
+      let binding: unknown;
       try {
-        cachedBinding = require(path) as NativeBinding;
-        return cachedBinding;
+        binding = require(path);
       } catch (cause) {
         throw new WarrenProxyError('unavailable', 'failed to load the native datapath addon', {
           cause,
         });
       }
+      if (nativeBindingStatus(binding) !== 'ready') {
+        throw new WarrenProxyError(
+          'outdated',
+          'the native datapath addon was built from another SDK version; rebuild packages/node/native/warren-napi',
+        );
+      }
+      cachedBinding = binding as NativeBinding;
+      return cachedBinding;
     }
   }
   throw new WarrenProxyError(

@@ -48,7 +48,17 @@ CARGO_TARGET_DIR=../../../../../warren-sdk-rs/target pnpm --package=@napi-rs/cli
 ```
 
 This emits `warren-napi.node` next to `index.cjs`. The loader finds it
-automatically.
+automatically, but it tries a triple-suffixed `warren-napi.<platform>-<arch>.node`
+first, so a stale one left by an earlier `napi build --platform` or a prebuilt
+shadows a fresh plain build: build with `--platform` too, or remove it.
+
+`pnpm build` never builds this addon, so a checkout can run one from an older
+SDK. The addon reports the shape of its JS surface through `bindingAbi()`
+(`BINDING_ABI` in `src/lib.rs`), and the facade refuses anything but its own
+`NATIVE_BINDING_ABI` with a `WarrenProxyError` of code `outdated`, an addon
+without that export included. Bump both together whenever a field the facade
+reads changes. `proxyDatapathStatus()` reads the same verdict without building
+a tunnel; the extension's native host reports it at hello.
 
 ## Live validation (real exit)
 

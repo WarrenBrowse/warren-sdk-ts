@@ -11,6 +11,10 @@
  * build defaults to. An older peer on either side is refused at `hello`: a
  * version 2 host would ignore the channel and answer a beta extension from the
  * prod API.
+ *
+ * The hello answer may also carry `datapath`, the state of the host's native
+ * addon, which is built apart from the host's scripts and can lag them. A peer
+ * that omits it is read as not saying, so the field needs no version bump.
  */
 import type { ProductChannel } from '@warrenbrowse/sdk-core';
 
@@ -28,6 +32,12 @@ export type ExtensionVpnState =
   | 'draining'
   | 'failed'
   | 'disconnected';
+
+/**
+ * Whether the host's native datapath addon can carry a tunnel: `missing` when
+ * it is not built, `outdated` when it was built from another SDK version.
+ */
+export type HostDatapath = 'ready' | 'missing' | 'outdated';
 
 /** Exit selection carried by a connect request. */
 export interface ExtensionExitQuery {
@@ -110,7 +120,14 @@ export interface ExtensionProxyAuth {
 export type HostResponse =
   // The host is identity-less: it reports only the protocol version. The
   // account address is derived in the extension from its own vault.
-  | { id: number; ok: true; type: 'hello'; protocol: number }
+  | {
+      id: number;
+      ok: true;
+      type: 'hello';
+      protocol: number;
+      /** The native addon's state; absent from a host that predates the field. */
+      datapath?: HostDatapath;
+    }
   | {
       id: number;
       ok: true;

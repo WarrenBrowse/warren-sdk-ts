@@ -5,6 +5,7 @@ import {
   type ExtensionExitLocation,
   type ExtensionProxyAuth,
   type ExtensionVpnState,
+  type HostDatapath,
   type HostMessage,
   type HostRequest,
 } from '../protocol.js';
@@ -52,6 +53,8 @@ export interface HostSessionOptions {
     mnemonic: string,
     channel: ProductChannel | undefined,
   ) => Promise<{ expiresAt: number }>;
+  /** Reads the native addon's state, reported at every hello. */
+  datapathStatus?: () => HostDatapath;
 }
 
 /**
@@ -84,11 +87,13 @@ export class HostSession {
           this.fail(request.id, 'protocol', 'unknown release channel');
         } else {
           this.channel = request.channel;
+          const datapath = this.options.datapathStatus?.();
           this.options.send({
             id: request.id,
             ok: true,
             type: 'hello',
             protocol: EXTENSION_PROTOCOL_VERSION,
+            ...(datapath ? { datapath } : {}),
           });
         }
         return;

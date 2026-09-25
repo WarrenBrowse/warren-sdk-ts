@@ -9,6 +9,7 @@ import {
   type ExtensionExitQuery,
   type ExtensionProxyAuth,
   type ExtensionVpnState,
+  type HostDatapath,
   type HostRequest,
   type HostResponse,
   parseHostMessage,
@@ -220,8 +221,9 @@ export class WarrenBrowserVpn {
 
   private port: NativePort | undefined;
   private portDead = false;
-  /** The hello of the current port, which every request on it waits for. */
-  private handshake: Promise<void> | undefined;
+  /** The hello of the current port, which every request on it waits for. It
+   * resolves with the datapath state the host reported, if it reported one. */
+  private handshake: Promise<HostDatapath | undefined> | undefined;
   private proxied = false;
   /** Whether the host that built the current tunnel is still attached. A dead
    * host takes its tunnel with it, while {@link proxied} keeps the browser
@@ -490,6 +492,18 @@ export class WarrenBrowserVpn {
     return { state: res.state, ...(res.endpoints ? { endpoints: res.endpoints } : {}) };
   }
 
+  /**
+   * Handshakes with the host and returns the state of its native datapath
+   * addon, or `undefined` from a host that does not report it. The addon is
+   * built apart from the host's scripts, so a host that answers can still be
+   * unable to build a tunnel: this tells that case apart before a connect.
+   */
+  async datapath(): Promise<HostDatapath | undefined> {
+    this.openPort();
+    this.handshake ??= this.hello();
+    return this.handshake;
+  }
+
   /** Lists the selectable exit locations from the host's verified relay list. */
   async listExits(): Promise<ExtensionExitLocation[]> {
     const res = await this.request({ type: 'exits' });
@@ -674,7 +688,7 @@ export class WarrenBrowserVpn {
     return this.send(body);
   }
 
-  private async hello(): Promise<void> {
+  private async hello(): Promise<HostDatapath | undefined> {
     let res: HostResponse;
     try {
       res = await this.send({
@@ -692,6 +706,7 @@ export class WarrenBrowserVpn {
       this.closePort();
       throw new WarrenExtensionError('protocol', 'host speaks an unsupported protocol version');
     }
+    return res.datapath;
   }
 
   private send(body: HostRequestBody): Promise<Extract<HostResponse, { ok: true }>> {

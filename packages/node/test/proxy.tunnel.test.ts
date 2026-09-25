@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  NATIVE_BINDING_ABI,
   type NativeWarrenProxy,
   type ProxyFatalCause,
   type ProxyMetrics,
@@ -7,8 +8,11 @@ import {
   ProxyTunnel,
   WarrenProxyError,
   isProxyDatapathAvailable,
+  nativeBindingStatus,
+  proxyDatapathStatus,
 } from '../src/index.js';
 
+const datapath = proxyDatapathStatus();
 const available = isProxyDatapathAvailable();
 
 const VECTOR_MNEMONIC =
@@ -53,18 +57,21 @@ describe('ProxyTunnel facade', () => {
     expect((err as WarrenProxyError).code).toBe('tunnel');
   });
 
-  it.skipIf(available)('throws a typed unavailable error when the native addon is missing', () => {
-    const err = (() => {
-      try {
-        ProxyTunnel.create({ mnemonic: 'x', apiBase: 'x', serverPubkeyPin: 'x' });
-      } catch (e) {
-        return e;
-      }
-      throw new Error('expected a throw');
-    })();
-    expect(err).toBeInstanceOf(WarrenProxyError);
-    expect((err as WarrenProxyError).code).toBe('unavailable');
-  });
+  it.skipIf(datapath !== 'missing')(
+    'throws a typed unavailable error when the native addon is missing',
+    () => {
+      const err = (() => {
+        try {
+          ProxyTunnel.create({ mnemonic: 'x', apiBase: 'x', serverPubkeyPin: 'x' });
+        } catch (e) {
+          return e;
+        }
+        throw new Error('expected a throw');
+      })();
+      expect(err).toBeInstanceOf(WarrenProxyError);
+      expect((err as WarrenProxyError).code).toBe('unavailable');
+    },
+  );
 });
 
 /**
@@ -177,5 +184,49 @@ describe('ProxyTunnel egress-proof surface', () => {
     );
     expect(err).toBeInstanceOf(WarrenProxyError);
     expect((err as WarrenProxyError).code).toBe('egress');
+  });
+});
+
+/**
+ * The addon is built outside `pnpm build`, so a checkout can carry one from an
+ * older SDK whose objects lack fields this facade relies on (the listener
+ * credentials, 2026-09-23). The binding reports its ABI, and anything else is
+ * named `outdated` before a tunnel is ever built on it.
+ */
+describe('native binding ABI', () => {
+  it('reads a binding reporting this facade ABI as ready', () => {
+    expect(nativeBindingStatus({ bindingAbi: () => NATIVE_BINDING_ABI })).toBe('ready');
+  });
+
+  it('reads a binding that predates the ABI report as outdated', () => {
+    expect(nativeBindingStatus({ WarrenProxy: class {} })).toBe('outdated');
+  });
+
+  it('reads a binding reporting another ABI as outdated, either way', () => {
+    expect(nativeBindingStatus({ bindingAbi: () => NATIVE_BINDING_ABI - 1 })).toBe('outdated');
+    expect(nativeBindingStatus({ bindingAbi: () => NATIVE_BINDING_ABI + 1 })).toBe('outdated');
+  });
+
+  it.skipIf(!available)('reports the built addon as ready', () => {
+    expect(proxyDatapathStatus()).toBe('ready');
+  });
+
+  it.skipIf(datapath !== 'missing')('reports a missing addon as missing', () => {
+    expect(isProxyDatapathAvailable()).toBe(false);
+  });
+
+  it.skipIf(datapath !== 'outdated')('refuses to build a tunnel on an outdated addon', () => {
+    const err = (() => {
+      try {
+        vectorTunnel();
+      } catch (e) {
+        return e;
+      }
+      throw new Error('expected a throw');
+    })();
+    expect(err).toBeInstanceOf(WarrenProxyError);
+    expect((err as WarrenProxyError).code).toBe('outdated');
+    expect((err as WarrenProxyError).message).toContain('rebuild');
+    expect(isProxyDatapathAvailable()).toBe(false);
   });
 });

@@ -436,6 +436,18 @@ impl ConnectedSession {
     }
 }
 
+/// The shape of this binding's JS surface, which the TS facade checks before it
+/// builds a tunnel on it (`NATIVE_BINDING_ABI` in `src/proxy/tunnel.ts`). The
+/// addon is built outside `pnpm build`, so a checkout can carry one from an
+/// older SDK. Bump both together whenever a field the facade reads changes.
+pub const BINDING_ABI: u32 = 1;
+
+/// Reports [`BINDING_ABI`]. An addon without this export predates it.
+#[napi]
+pub fn binding_abi() -> u32 {
+    BINDING_ABI
+}
+
 /// A forwarded tunnel-side port (see [`WarrenProxy::forward_port`]).
 #[napi]
 pub struct WarrenForwardedPort {

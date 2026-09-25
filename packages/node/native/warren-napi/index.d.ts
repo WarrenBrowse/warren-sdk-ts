@@ -220,3 +220,9 @@ export declare class WarrenProxy {
     localTarget: string,
   ): Promise<WarrenForwardedPort>;
 }
+
+/**
+ * The shape of this binding's JS surface. The TS facade refuses a binding
+ * reporting another value, and one without this export at all, which predates it.
+ */
+export function bindingAbi(): number;

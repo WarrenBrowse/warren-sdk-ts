@@ -2,7 +2,11 @@ import { API_BASE_URL_BY_CHANNEL, type ProductChannel, apiBaseUrl } from '@warre
 import { describe, expect, it } from 'vitest';
 import { callerAllowed, configFromEnv, hostApiBase } from '../src/host/run.js';
 import { HostSession, type HostTunnel, type HostTunnelFactory } from '../src/host/session.js';
-import { EXTENSION_PROTOCOL_VERSION, type HostMessage } from '../src/protocol.js';
+import {
+  EXTENSION_PROTOCOL_VERSION,
+  type HostDatapath,
+  type HostMessage,
+} from '../src/protocol.js';
 
 const LISTENERS = { socks5: '127.0.0.1:1080', http: '127.0.0.1:8118' };
 const AUTH = { username: 'warren', password: 'session-secret' };
@@ -44,6 +48,7 @@ function makeSession(
       mnemonic: string,
       channel: ProductChannel | undefined,
     ) => Promise<{ expiresAt: number }>;
+    datapathStatus?: () => HostDatapath;
   } = {},
 ) {
   const sent: HostMessage[] = [];
@@ -316,5 +321,48 @@ describe('hostApiBase', () => {
 
   it('falls back to the compiled channel when the extension named none', () => {
     expect(hostApiBase(configFromEnv({}), undefined)).toBe(apiBaseUrl);
+  });
+});
+
+/**
+ * The native addon is built apart from the host's scripts, so a host can run
+ * on one from an older SDK. The hello says so before the extension asks for a
+ * tunnel, so the setup page can name the one command that fixes it.
+ */
+describe('HostSession native datapath', () => {
+  it('reports the state of its native datapath at hello', async () => {
+    const { session, sent } = makeSession(new FakeTunnel(), { datapathStatus: () => 'outdated' });
+    await session.handle({ id: 1, type: 'hello', protocol: EXTENSION_PROTOCOL_VERSION });
+    expect(sent[0]).toEqual({
+      id: 1,
+      ok: true,
+      type: 'hello',
+      protocol: EXTENSION_PROTOCOL_VERSION,
+      datapath: 'outdated',
+    });
+  });
+
+  it('reads the datapath at each hello rather than once', async () => {
+    let status: HostDatapath = 'outdated';
+    const { session, sent } = makeSession(new FakeTunnel(), { datapathStatus: () => status });
+    await session.handle({ id: 1, type: 'hello', protocol: EXTENSION_PROTOCOL_VERSION });
+    status = 'ready';
+    await session.handle({ id: 2, type: 'hello', protocol: EXTENSION_PROTOCOL_VERSION });
+    expect(sent.map((m) => (m as { datapath?: HostDatapath }).datapath)).toEqual([
+      'outdated',
+      'ready',
+    ]);
+  });
+
+  it('answers a connect on an outdated datapath with its own code', async () => {
+    const { sent } = makeSession();
+    const session = new HostSession({
+      createTunnel: async () => {
+        throw Object.assign(new Error('rebuild the addon'), { code: 'outdated' });
+      },
+      send: (m) => sent.push(m),
+    });
+    await session.handle({ id: 1, type: 'connect', mnemonic: M });
+    expect(sent.at(-1)).toMatchObject({ id: 1, ok: false, code: 'outdated' });
   });
 });

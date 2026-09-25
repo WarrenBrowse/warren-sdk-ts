@@ -8,7 +8,7 @@ import {
   seedFromMnemonic,
   verifySignedRelayList,
 } from '@warrenbrowse/sdk-core';
-import { ProxyTunnel } from '@warrenbrowse/sdk-node';
+import { ProxyTunnel, proxyDatapathStatus } from '@warrenbrowse/sdk-node';
 import type { HostRequest } from '../protocol.js';
 import { NativeFrameDecoder, encodeNativeFrame } from './framing.js';
 import { HostSession } from './session.js';
@@ -134,6 +134,7 @@ export function runNativeHost(config: NativeHostConfig): Promise<void> {
         onState: (state) => onState(state),
       });
     },
+    datapathStatus: proxyDatapathStatus,
     send: (message) => process.stdout.write(encodeNativeFrame(message)),
   });
 

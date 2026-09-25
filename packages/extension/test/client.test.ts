@@ -903,6 +903,36 @@ describe('WarrenBrowserVpn handshake', () => {
   });
 });
 
+describe('WarrenBrowserVpn native datapath', () => {
+  it('reports the datapath its host named at hello', async () => {
+    const { chrome } = fakeChrome((req, p) => {
+      if (req.type === 'hello') {
+        p.emit({
+          id: req.id,
+          ok: true,
+          type: 'hello',
+          protocol: EXTENSION_PROTOCOL_VERSION,
+          datapath: 'outdated',
+        });
+      }
+    });
+    expect(await new WarrenBrowserVpn({ chrome }).datapath()).toBe('outdated');
+  });
+
+  it('reports nothing for a host that names no datapath', async () => {
+    const { chrome } = fakeChrome(healthyHost);
+    expect(await new WarrenBrowserVpn({ chrome }).datapath()).toBeUndefined();
+  });
+
+  it('refuses the probe of a host that refuses the hello', async () => {
+    const { chrome } = fakeChrome((req, p) => {
+      p.emit({ id: req.id, ok: false, code: 'protocol', message: 'unsupported protocol version' });
+    });
+    const err = await new WarrenBrowserVpn({ chrome }).datapath().catch((e) => e);
+    expect((err as WarrenExtensionError).code).toBe('protocol');
+  });
+});
+
 describe('WarrenBrowserVpn DAITA', () => {
   it('carries the daita flag on the connect request', async () => {
     let seen: boolean | undefined;

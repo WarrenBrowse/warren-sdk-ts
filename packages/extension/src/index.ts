@@ -33,6 +33,7 @@ export {
   type ExtensionExitQuery,
   type ExtensionProxyAuth,
   type ExtensionVpnState,
+  type HostDatapath,
   type HostMessage,
   type HostRequest,
   type HostResponse,
