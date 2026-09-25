@@ -1,3 +1,4 @@
+import type { ProductChannel } from '@warrenbrowse/sdk-core';
 import {
   EXTENSION_PROTOCOL_VERSION,
   type ExtensionEndpoints,
@@ -18,6 +19,10 @@ export interface HostTunnel {
   shutdown(): Promise<void>;
 }
 
+function isChannel(value: unknown): value is ProductChannel {
+  return value === 'prod' || value === 'beta';
+}
+
 /** Whether a value is a credential a listener can carry: a non-empty string. */
 function isCredential(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
@@ -32,17 +37,21 @@ export type HostTunnelFactory = (
   mnemonic: string,
   onState: (state: string) => void,
   /** Tunnel-creation options that cannot wait for connect (engine-level). */
-  init?: { daita?: boolean },
+  init?: { daita?: boolean; channel?: ProductChannel },
 ) => Promise<HostTunnel>;
 
 /** Options for {@link HostSession}. */
 export interface HostSessionOptions {
   createTunnel: HostTunnelFactory;
   send: (message: HostMessage) => void;
-  /** Verified relay-list locations; absent when the host has no discovery source. */
-  listExits?: () => Promise<ExtensionExitLocation[]>;
+  /** Verified relay-list locations; absent when the host has no discovery source.
+   * `channel` is the one the extension named at hello, if it did. */
+  listExits?: (channel: ProductChannel | undefined) => Promise<ExtensionExitLocation[]>;
   /** Signed subscription lookup; the mnemonic follows the connect handling rules. */
-  accountStatus?: (mnemonic: string) => Promise<{ expiresAt: number }>;
+  accountStatus?: (
+    mnemonic: string,
+    channel: ProductChannel | undefined,
+  ) => Promise<{ expiresAt: number }>;
 }
 
 /**
@@ -55,6 +64,8 @@ export class HostSession {
   private endpoints: ExtensionEndpoints | undefined;
   private state: ExtensionVpnState = 'disconnected';
   private connecting = false;
+  /** The extension's channel, from its hello. */
+  private channel: ProductChannel | undefined;
 
   constructor(options: HostSessionOptions) {
     this.options = options;
@@ -69,7 +80,10 @@ export class HostSession {
       case 'hello':
         if (request.protocol !== EXTENSION_PROTOCOL_VERSION) {
           this.fail(request.id, 'protocol', 'unsupported protocol version');
+        } else if (request.channel !== undefined && !isChannel(request.channel)) {
+          this.fail(request.id, 'protocol', 'unknown release channel');
         } else {
+          this.channel = request.channel;
           this.options.send({
             id: request.id,
             ok: true,
@@ -100,7 +114,7 @@ export class HostSession {
           return;
         }
         try {
-          const locations = await this.options.listExits();
+          const locations = await this.options.listExits(this.channel);
           this.options.send({ id: request.id, ok: true, type: 'exits', locations });
         } catch (error) {
           this.fail(request.id, errorCode(error), errorMessage(error, 'exits failed'));
@@ -112,7 +126,7 @@ export class HostSession {
           return;
         }
         try {
-          const { expiresAt } = await this.options.accountStatus(request.mnemonic);
+          const { expiresAt } = await this.options.accountStatus(request.mnemonic, this.channel);
           this.options.send({ id: request.id, ok: true, type: 'account', expiresAt });
         } catch (error) {
           this.fail(request.id, errorCode(error), errorMessage(error, 'account failed'));
@@ -142,7 +156,10 @@ export class HostSession {
           this.state = state as ExtensionVpnState;
           this.options.send({ type: 'state', state: this.state });
         },
-        { ...(request.daita !== undefined ? { daita: request.daita } : {}) },
+        {
+          ...(request.daita !== undefined ? { daita: request.daita } : {}),
+          ...(this.channel ? { channel: this.channel } : {}),
+        },
       );
       const { socks5, http, username, password } = await tunnel.connect({
         ...(request.selector ? { selector: request.selector } : {}),

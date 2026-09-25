@@ -1,18 +1,21 @@
 /**
- * Extension <-> native-host protocol (version 2).
+ * Extension <-> native-host protocol (version 3).
  *
  * Chrome's native messaging carries whole JSON values, so these shapes are the
  * entire wire contract. The mnemonic crosses it only inside a connect or
  * account request, and the host does not keep it.
  *
- * Version 2 is the version whose host listeners demand credentials: the
- * connect answer carries them, and a version 1 peer on either side, which
- * would route a browser through listeners it cannot authenticate to, is
- * refused at `hello`.
+ * Version 2 made the host listeners demand credentials: the connect answer
+ * carries them. Version 3 has the extension name its release channel in
+ * `hello`, and the host reaches that channel's API whatever channel its own
+ * build defaults to. An older peer on either side is refused at `hello`: a
+ * version 2 host would ignore the channel and answer a beta extension from the
+ * prod API.
  */
+import type { ProductChannel } from '@warrenbrowse/sdk-core';
 
 /** Protocol version spoken by this package. */
-export const EXTENSION_PROTOCOL_VERSION = 2;
+export const EXTENSION_PROTOCOL_VERSION = 3;
 
 /** Default native messaging host name the browser resolves to the local binary. */
 export const DEFAULT_HOST_NAME = 'com.warrenbrowse.host';
@@ -53,7 +56,13 @@ export interface ExtensionExitLocation {
 
 /** Requests the extension sends to the host. */
 export type HostRequest =
-  | { id: number; type: 'hello'; protocol: number }
+  | {
+      id: number;
+      type: 'hello';
+      protocol: number;
+      /** The extension's release channel: the host reaches this channel's API. */
+      channel?: ProductChannel;
+    }
   | { id: number; type: 'status' }
   | {
       id: number;

@@ -37,7 +37,7 @@ launch. Auto-lock and explicit lock wipe both.
 - **The listeners demand credentials.** Every account and process on the
   machine can reach a loopback port, so the host's listeners refuse any client
   without the credentials it mints for each tunnel, and hands them over once,
-  in the connect answer (protocol 2; a version 1 peer is refused at `hello`).
+  in the connect answer.
   `WarrenBrowserVpn` keeps them in memory for as long as that host lives and
   gives them out through `forListener(address)` only for its own listeners.
   Chromium cannot authenticate to a SOCKS5 proxy, so it is pointed at the HTTP
@@ -48,6 +48,13 @@ launch. Auto-lock and explicit lock wipe both.
   `proxy.onRequest` handler whose SOCKS5 answers carry them. On Chromium this
   needs the `webRequest` and `webRequestAuthProvider` permissions and a host
   permission for every URL.
+- **The extension picks the API.** Its first message on every port is a
+  `hello` naming its release channel (`WarrenBrowserVpnOptions.channel`), and
+  the host reaches that channel's API whatever channel its own build defaults
+  to; only an explicit `WARREN_API_BASE` in the host's environment overrides
+  it. A host speaking an older protocol (version 3 today) is refused at that
+  `hello`, before it is asked anything, and the port is closed so the next
+  attempt spawns the host an update put in place.
 - **Proxy control is verified, not assumed.** In Chromium the most recently
   installed extension wins the proxy setting and a losing `set()` is a silent
   no-op. `connect()` checks `levelOfControl` before dialing the tunnel and

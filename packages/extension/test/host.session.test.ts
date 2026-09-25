@@ -1,5 +1,6 @@
+import { API_BASE_URL_BY_CHANNEL, type ProductChannel, apiBaseUrl } from '@warrenbrowse/sdk-core';
 import { describe, expect, it } from 'vitest';
-import { callerAllowed } from '../src/host/run.js';
+import { callerAllowed, configFromEnv, hostApiBase } from '../src/host/run.js';
 import { HostSession, type HostTunnel, type HostTunnelFactory } from '../src/host/session.js';
 import { EXTENSION_PROTOCOL_VERSION, type HostMessage } from '../src/protocol.js';
 
@@ -36,12 +37,17 @@ const M = 'test mnemonic';
 function makeSession(
   tunnel: FakeTunnel = new FakeTunnel(),
   extras: {
-    listExits?: () => Promise<{ country: string; city: string; active: boolean }[]>;
-    accountStatus?: (mnemonic: string) => Promise<{ expiresAt: number }>;
+    listExits?: (
+      channel: ProductChannel | undefined,
+    ) => Promise<{ country: string; city: string; active: boolean }[]>;
+    accountStatus?: (
+      mnemonic: string,
+      channel: ProductChannel | undefined,
+    ) => Promise<{ expiresAt: number }>;
   } = {},
 ) {
   const sent: HostMessage[] = [];
-  let seenInit: { daita?: boolean } | undefined;
+  let seenInit: { daita?: boolean; channel?: ProductChannel } | undefined;
   const factory: HostTunnelFactory = async (mnemonic, onState, init) => {
     tunnel.seenMnemonic = mnemonic;
     tunnel.onStateCb = onState;
@@ -71,6 +77,51 @@ describe('HostSession', () => {
   it('rejects an unknown protocol version', async () => {
     const { session, sent } = makeSession();
     await session.handle({ id: 1, type: 'hello', protocol: 42 });
+    expect(sent[0]).toMatchObject({ id: 1, ok: false, code: 'protocol' });
+  });
+
+  it('refuses a protocol 2 extension, which does not name its channel', async () => {
+    const { session, sent } = makeSession();
+    await session.handle({ id: 1, type: 'hello', protocol: 2 });
+    expect(sent[0]).toMatchObject({ id: 1, ok: false, code: 'protocol' });
+  });
+
+  it('reaches the API of the channel the extension names at hello', async () => {
+    const seen: unknown[] = [];
+    const { session, seenInit } = makeSession(new FakeTunnel(), {
+      listExits: async (channel) => {
+        seen.push(['exits', channel]);
+        return [];
+      },
+      accountStatus: async (_mnemonic, channel) => {
+        seen.push(['account', channel]);
+        return { expiresAt: 1 };
+      },
+    });
+    await session.handle({
+      id: 1,
+      type: 'hello',
+      protocol: EXTENSION_PROTOCOL_VERSION,
+      channel: 'beta',
+    });
+    await session.handle({ id: 2, type: 'exits' });
+    await session.handle({ id: 3, type: 'account', mnemonic: M });
+    await session.handle({ id: 4, type: 'connect', mnemonic: M });
+    expect(seen).toEqual([
+      ['exits', 'beta'],
+      ['account', 'beta'],
+    ]);
+    expect(seenInit()).toEqual({ channel: 'beta' });
+  });
+
+  it('refuses a hello naming a channel it does not know', async () => {
+    const { session, sent } = makeSession();
+    await session.handle({
+      id: 1,
+      type: 'hello',
+      protocol: EXTENSION_PROTOCOL_VERSION,
+      channel: 'staging' as never,
+    });
     expect(sent[0]).toMatchObject({ id: 1, ok: false, code: 'protocol' });
   });
 
@@ -249,5 +300,21 @@ describe('callerAllowed', () => {
     ];
     expect(callerAllowed(firefoxArgv, ['warren@warrenbrowse.com'])).toBe(true);
     expect(callerAllowed(firefoxArgv, ['other@example.com'])).toBe(false);
+  });
+});
+
+describe('hostApiBase', () => {
+  it("follows the channel the extension named, whatever the host's own build", () => {
+    expect(hostApiBase({}, 'beta')).toBe(API_BASE_URL_BY_CHANNEL.beta);
+    expect(hostApiBase({}, 'prod')).toBe(API_BASE_URL_BY_CHANNEL.prod);
+  });
+
+  it('keeps an explicit WARREN_API_BASE over the channel', () => {
+    const config = configFromEnv({ WARREN_API_BASE: 'https://api.example.test' });
+    expect(hostApiBase(config, 'beta')).toBe('https://api.example.test');
+  });
+
+  it('falls back to the compiled channel when the extension named none', () => {
+    expect(hostApiBase(configFromEnv({}), undefined)).toBe(apiBaseUrl);
   });
 });

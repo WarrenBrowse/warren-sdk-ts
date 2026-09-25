@@ -1,3 +1,4 @@
+import { productChannel } from '@warrenbrowse/sdk-core';
 import { describe, expect, it, vi } from 'vitest';
 import {
   type ChromeLike,
@@ -854,6 +855,51 @@ describe('WarrenBrowserVpn discovery and account', () => {
     const vpn = new WarrenBrowserVpn({ chrome });
     expect(await vpn.account('words')).toEqual({ expiresAt: 1790000000 });
     expect(seen).toBe('words');
+  });
+});
+
+describe('WarrenBrowserVpn handshake', () => {
+  function recordingHost(seen: HostRequest[]) {
+    return (req: HostRequest, p: FakePort) => {
+      seen.push(req);
+      healthyHost(req, p);
+      if (req.type === 'exits') p.emit({ id: req.id, ok: true, type: 'exits', locations: [] });
+    };
+  }
+
+  it('names its channel in a hello before the first request on a port', async () => {
+    const seen: HostRequest[] = [];
+    const { chrome } = fakeChrome(recordingHost(seen));
+    await new WarrenBrowserVpn({ chrome, channel: 'beta' }).listExits();
+    expect(seen.map((r) => r.type)).toEqual(['hello', 'exits']);
+    expect(seen[0]).toMatchObject({ protocol: EXTENSION_PROTOCOL_VERSION, channel: 'beta' });
+  });
+
+  it('handshakes once per port', async () => {
+    const seen: HostRequest[] = [];
+    const { chrome } = fakeChrome(recordingHost(seen));
+    const vpn = new WarrenBrowserVpn({ chrome, channel: 'beta' });
+    await vpn.listExits();
+    await vpn.listExits();
+    expect(seen.map((r) => r.type)).toEqual(['hello', 'exits', 'exits']);
+  });
+
+  it('names the compiled channel when none is given', async () => {
+    const seen: HostRequest[] = [];
+    const { chrome } = fakeChrome(recordingHost(seen));
+    await new WarrenBrowserVpn({ chrome }).listExits();
+    expect(seen[0]).toMatchObject({ type: 'hello', channel: productChannel });
+  });
+
+  it('asks nothing of a host that refuses the hello', async () => {
+    const seen: HostRequest[] = [];
+    const { chrome } = fakeChrome((req, p) => {
+      seen.push(req);
+      p.emit({ id: req.id, ok: false, code: 'protocol', message: 'unsupported protocol version' });
+    });
+    const err = await new WarrenBrowserVpn({ chrome, channel: 'beta' }).listExits().catch((e) => e);
+    expect((err as WarrenExtensionError).code).toBe('protocol');
+    expect(seen.map((r) => r.type)).toEqual(['hello']);
   });
 });
 

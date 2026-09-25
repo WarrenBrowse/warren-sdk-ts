@@ -1,3 +1,4 @@
+import { type ProductChannel, productChannel } from '@warrenbrowse/sdk-core';
 import { hardenBrowserLeaks, releaseBrowserLeaks } from './leaks.js';
 import {
   DEFAULT_HOST_NAME,
@@ -31,6 +32,14 @@ export type WarrenExtensionErrorCode =
   | 'not_connected'
   | 'proxy_uncontrollable'
   | 'private_browsing_required';
+
+// Distributive omit: a plain Omit over the request union would collapse it to
+// the shared keys and drop per-variant fields like `protocol`.
+type HostRequestBody = HostRequest extends infer R
+  ? R extends HostRequest
+    ? Omit<R, 'id'>
+    : never
+  : never;
 
 /** A typed extension-side error. Host messages are already redacted by the host. */
 export class WarrenExtensionError extends Error {
@@ -114,6 +123,13 @@ export interface WarrenBrowserVpnOptions {
   platform?: ExtensionPlatform;
   /** Called on every tunnel state transition relayed by the host. */
   onState?: (state: ExtensionVpnState) => void;
+  /**
+   * The release channel whose API the host reaches for this extension.
+   * Defaults to the channel `@warrenbrowse/sdk-core` was built for; a product
+   * passes its own, so a host or SDK built for the other channel cannot
+   * decide it.
+   */
+  channel?: ProductChannel;
 }
 
 /** Options for {@link WarrenBrowserVpn.connect}. */
@@ -200,9 +216,12 @@ export class WarrenBrowserVpn {
   private readonly hostName: string;
   private readonly chromeApi: ChromeLike | undefined;
   private readonly onState: ((state: ExtensionVpnState) => void) | undefined;
+  private readonly channel: ProductChannel;
 
   private port: NativePort | undefined;
   private portDead = false;
+  /** The hello of the current port, which every request on it waits for. */
+  private handshake: Promise<void> | undefined;
   private proxied = false;
   /** Whether the host that built the current tunnel is still attached. A dead
    * host takes its tunnel with it, while {@link proxied} keeps the browser
@@ -230,6 +249,7 @@ export class WarrenBrowserVpn {
     this.chromeApi = options.chrome;
     this.platformOption = options.platform;
     this.onState = options.onState;
+    this.channel = options.channel ?? productChannel;
   }
 
   private get platform(): ExtensionPlatform {
@@ -319,10 +339,6 @@ export class WarrenBrowserVpn {
             'this browser cannot route requests one by one',
           );
         }
-      }
-      const hello = await this.request({ type: 'hello', protocol: EXTENSION_PROTOCOL_VERSION });
-      if (hello.type !== 'hello' || hello.protocol !== EXTENSION_PROTOCOL_VERSION) {
-        throw new WarrenExtensionError('protocol', 'host speaks an unsupported protocol version');
       }
       const httpProxy = this.platform === 'chromium' ? true : options.httpProxy;
       const res = await this.request({
@@ -583,6 +599,7 @@ export class WarrenBrowserVpn {
     }
     this.port = port;
     this.portDead = false;
+    this.handshake = undefined;
     port.onMessage.addListener((raw) => this.onMessage(raw));
     port.onDisconnect.addListener(() => {
       this.portDead = true;
@@ -644,11 +661,40 @@ export class WarrenBrowserVpn {
     }
   }
 
-  private request(
-    // Distributive omit: a plain Omit over the request union would collapse
-    // it to the shared keys and drop per-variant fields like `protocol`.
-    body: HostRequest extends infer R ? (R extends HostRequest ? Omit<R, 'id'> : never) : never,
-  ): Promise<Extract<HostResponse, { ok: true }>> {
+  /**
+   * Sends `body` once the port's hello has gone through. The hello names this
+   * extension's channel before the host serves anything, so a host that
+   * would answer from the other channel's API, or speaks an older protocol,
+   * is refused before it is asked a thing.
+   */
+  private async request(body: HostRequestBody): Promise<Extract<HostResponse, { ok: true }>> {
+    this.openPort();
+    this.handshake ??= this.hello();
+    await this.handshake;
+    return this.send(body);
+  }
+
+  private async hello(): Promise<void> {
+    let res: HostResponse;
+    try {
+      res = await this.send({
+        type: 'hello',
+        protocol: EXTENSION_PROTOCOL_VERSION,
+        channel: this.channel,
+      });
+    } catch (error) {
+      if (!(error instanceof WarrenExtensionError) || error.code !== 'host') throw error;
+      res = { id: 0, ok: false, code: error.hostCode ?? 'host', message: error.message };
+    }
+    if (!res.ok || res.type !== 'hello' || res.protocol !== EXTENSION_PROTOCOL_VERSION) {
+      // A later attempt must reach a freshly spawned host, the one an update
+      // put in place, never this one again.
+      this.closePort();
+      throw new WarrenExtensionError('protocol', 'host speaks an unsupported protocol version');
+    }
+  }
+
+  private send(body: HostRequestBody): Promise<Extract<HostResponse, { ok: true }>> {
     const port = this.openPort();
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
