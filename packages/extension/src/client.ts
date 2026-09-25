@@ -233,6 +233,8 @@ export class WarrenBrowserVpn {
   /** The credentials of the live host's listeners; dropped with the host. */
   private auth: ExtensionProxyAuth | undefined;
   private connecting = false;
+  /** Questions in flight, which the port must outlive. */
+  private questions = 0;
   /** Set for the length of an explicit {@link disconnect}, whose host may exit
    * on its own once it has answered: that exit is not a lost host. */
   private releasing = false;
@@ -485,7 +487,7 @@ export class WarrenBrowserVpn {
 
   /** Asks the host for the current tunnel state. */
   async status(): Promise<{ state: ExtensionVpnState; endpoints?: ExtensionEndpoints }> {
-    const res = await this.request({ type: 'status' });
+    const res = await this.asking(() => this.request({ type: 'status' }));
     if (res.type !== 'status') {
       throw new WarrenExtensionError('protocol', 'unexpected host response to status');
     }
@@ -499,14 +501,16 @@ export class WarrenBrowserVpn {
    * unable to build a tunnel: this tells that case apart before a connect.
    */
   async datapath(): Promise<HostDatapath | undefined> {
-    this.openPort();
-    this.handshake ??= this.hello();
-    return this.handshake;
+    return this.asking(() => {
+      this.openPort();
+      this.handshake ??= this.hello();
+      return this.handshake;
+    });
   }
 
   /** Lists the selectable exit locations from the host's verified relay list. */
   async listExits(): Promise<ExtensionExitLocation[]> {
-    const res = await this.request({ type: 'exits' });
+    const res = await this.asking(() => this.request({ type: 'exits' }));
     if (res.type !== 'exits') {
       throw new WarrenExtensionError('protocol', 'unexpected host response to exits');
     }
@@ -518,7 +522,7 @@ export class WarrenBrowserVpn {
    * rules as connect: handed once to the local host to sign, never persisted.
    */
   async account(mnemonic: string): Promise<{ expiresAt: number }> {
-    const res = await this.request({ type: 'account', mnemonic });
+    const res = await this.asking(() => this.request({ type: 'account', mnemonic }));
     if (res.type !== 'account') {
       throw new WarrenExtensionError('protocol', 'unexpected host response to account');
     }
@@ -681,6 +685,22 @@ export class WarrenBrowserVpn {
    * would answer from the other channel's API, or speaks an older protocol,
    * is refused before it is asked a thing.
    */
+  /**
+   * Runs a question to the host. The browser spawns the host with the port, so
+   * a port left open after a question keeps a helper process alive for as long
+   * as the browser runs, carrying nothing: with no tunnel up or coming up, the
+   * last question to finish closes it.
+   */
+  private async asking<T>(question: () => Promise<T>): Promise<T> {
+    this.questions += 1;
+    try {
+      return await question();
+    } finally {
+      this.questions -= 1;
+      if (this.questions === 0 && !this.tunnelUp && !this.connecting) this.closePort();
+    }
+  }
+
   private async request(body: HostRequestBody): Promise<Extract<HostResponse, { ok: true }>> {
     this.openPort();
     this.handshake ??= this.hello();

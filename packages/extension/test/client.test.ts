@@ -879,8 +879,7 @@ describe('WarrenBrowserVpn handshake', () => {
     const seen: HostRequest[] = [];
     const { chrome } = fakeChrome(recordingHost(seen));
     const vpn = new WarrenBrowserVpn({ chrome, channel: 'beta' });
-    await vpn.listExits();
-    await vpn.listExits();
+    await Promise.all([vpn.listExits(), vpn.listExits()]);
     expect(seen.map((r) => r.type)).toEqual(['hello', 'exits', 'exits']);
   });
 
@@ -900,6 +899,45 @@ describe('WarrenBrowserVpn handshake', () => {
     const err = await new WarrenBrowserVpn({ chrome, channel: 'beta' }).listExits().catch((e) => e);
     expect((err as WarrenExtensionError).code).toBe('protocol');
     expect(seen.map((r) => r.type)).toEqual(['hello']);
+  });
+});
+
+// The helper is spawned by the port: a port left open after a question keeps
+// a host process alive for as long as the browser runs, with nothing to carry.
+describe('WarrenBrowserVpn host lifetime', () => {
+  function answeringHost(req: HostRequest, p: FakePort): void {
+    healthyHost(req, p);
+    if (req.type === 'exits') p.emit({ id: req.id, ok: true, type: 'exits', locations: [] });
+    if (req.type === 'status') p.emit({ id: req.id, ok: true, type: 'status', state: 'connected' });
+  }
+
+  it('releases the host a probe spawned when no tunnel is up', async () => {
+    const { chrome, port } = fakeChrome(answeringHost);
+    await new WarrenBrowserVpn({ chrome }).datapath();
+    expect(port.disconnected).toBe(true);
+  });
+
+  it('releases the host once the exits are listed with no tunnel up', async () => {
+    const { chrome, port } = fakeChrome(answeringHost);
+    await new WarrenBrowserVpn({ chrome }).listExits();
+    expect(port.disconnected).toBe(true);
+  });
+
+  it('waits for the last concurrent question before releasing the host', async () => {
+    const { chrome, port } = fakeChrome(answeringHost);
+    const vpn = new WarrenBrowserVpn({ chrome });
+    const results = await Promise.all([vpn.datapath(), vpn.listExits()]);
+    expect(results[1]).toEqual([]);
+    expect(port.disconnected).toBe(true);
+  });
+
+  it('keeps the host that carries the tunnel after a question', async () => {
+    const { chrome, port } = fakeChrome(answeringHost);
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+    await vpn.status();
+    await vpn.listExits();
+    expect(port.disconnected).toBe(false);
   });
 });
 
