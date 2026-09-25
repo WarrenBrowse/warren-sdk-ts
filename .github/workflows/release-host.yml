@@ -1,0 +1,333 @@
+# Release pipeline for the browser extension's helper (warren-host, the crate
+# in packages/extension/native-host).
+#
+# Tag shapes (shared release-channel contract: one run publishes one channel):
+#   host-vX.Y.Z       prod -> a published release
+#   host-beta-vX.Y.Z  beta -> a published prerelease
+# The channel is baked in at compile time (WARREN_PRODUCT_ENV), which picks the
+# build's default API and the extension ids it trusts.
+#
+# A tag publishes only when its version equals the crate's, it is the strictly
+# highest of its own series on origin, its commit is on main, and that commit
+# already has a green CI run. workflow_dispatch builds every lane without
+# publishing anything (a dry run).
+#
+# Assets: warren-host-macos-universal, Warren-Helper.pkg (unsigned: no
+# Developer ID exists), warren-host-linux-x86_64 and warren-host-linux-aarch64
+# (static musl), Warren-Helper-Setup.exe (the Windows binary itself, which
+# installs itself on a double-click; static CRT), install.sh and install.ps1
+# with the tag written in, and SHA256SUMS over all of them.
+#
+# They travel as release assets, never Actions artifacts: the org artifact
+# quota is exhausted. The release is created as a draft, each lane uploads to
+# it, and the last job checksums what was uploaded and publishes, so nobody
+# downloads a half-populated release.
+
+name: release-host
+
+on:
+  push:
+    tags:
+      - 'host-v[0-9]+.[0-9]+.[0-9]+'
+      - 'host-beta-v[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Channel to build (dry run: build only, no publish)'
+        required: false
+        default: beta
+        type: choice
+        options: [beta, prod]
+
+permissions:
+  # actions: read lets the resolve gate read this commit's CI runs.
+  actions: read
+  contents: write
+
+# One publish per ref at a time, never cancelled half-way.
+concurrency:
+  group: release-host-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  resolve:
+    name: Resolve channel and version
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 15
+    outputs:
+      channel: ${{ steps.resolve.outputs.channel }}
+      version: ${{ steps.resolve.outputs.version }}
+      publish: ${{ steps.resolve.outputs.publish }}
+      release_id: ${{ steps.draft.outputs.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: resolve
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          INPUT_CHANNEL: ${{ github.event.inputs.channel }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          crate=$(awk '/^\[package\]/{p=1;next} /^\[/{p=0} p && $1=="version"{gsub(/"/,"",$3); print $3; exit}' packages/extension/native-host/Cargo.toml)
+          if [ "$EVENT" = "push" ]; then
+            case "$REF_NAME" in
+              host-beta-v*) channel=beta; prefix="host-beta-v" ;;
+              host-v*)      channel=prod; prefix="host-v" ;;
+              *) echo "::error::unexpected tag $REF_NAME"; exit 1 ;;
+            esac
+            version="${REF_NAME#"$prefix"}"
+            # `--version` prints the crate version: a tag that disagrees with
+            # it ships a binary that misnames its own release.
+            if [ "$crate" != "$version" ]; then
+              echo "::error::refusing ${REF_NAME}: native-host/Cargo.toml says $crate"; exit 1
+            fi
+            # Strictly the highest of its own series, read from the remote
+            # (the two series are never sorted together). A re-run of the same
+            # run is exempt, so a partial publish can always be finished.
+            if [ "${RUN_ATTEMPT:-1}" = "1" ]; then
+              highest=$(git ls-remote --tags origin "refs/tags/${prefix}*" \
+                | sed "s|.*refs/tags/${prefix}||" | grep -v '\^{}' | sort -V | tail -1)
+              if [ "$highest" != "$version" ]; then
+                echo "::error::refusing ${REF_NAME}: highest ${prefix}* on origin is ${prefix}${highest}"; exit 1
+              fi
+            fi
+            git fetch --no-tags --quiet origin +refs/heads/main:refs/remotes/origin/main
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+              echo "::error::refusing ${REF_NAME}: its commit is not on main"; exit 1
+            fi
+            # The release inherits the CI gates instead of re-running them all.
+            runs=$(curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?head_sha=${GITHUB_SHA}&status=success&per_page=1") \
+              || { echo "::error::the workflow-runs API is unreadable"; exit 1; }
+            green=$(printf '%s' "$runs" | tr -d ' \n' | sed -nE 's/^\{"total_count":([0-9]+).*/\1/p')
+            if [ "${green:-0}" -lt 1 ]; then
+              echo "::error::refusing ${REF_NAME}: no successful CI run on its commit; wait for CI, then re-run this workflow"; exit 1
+            fi
+            publish=true
+          else
+            channel="${INPUT_CHANNEL:-beta}"
+            version="$crate"
+            publish=false
+          fi
+          {
+            echo "channel=$channel"
+            echo "version=$version"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "building warren-host $version for the $channel channel (publish=$publish)"
+      - uses: actions/setup-node@v4
+        if: steps.resolve.outputs.publish == 'true'
+        with:
+          node-version: 20
+      - id: draft
+        if: steps.resolve.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CHANNEL: ${{ steps.resolve.outputs.channel }}
+          VERSION: ${{ steps.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          prerelease=false
+          [ "$CHANNEL" = beta ] && prerelease=true
+          id=$(node scripts/release-host.mjs draft "$GITHUB_REF_NAME" "Warren helper ${VERSION} (${CHANNEL})" "$prerelease")
+          echo "id=$id" >> "$GITHUB_OUTPUT"
+          echo "draft release $id"
+
+  build:
+    name: Build ${{ matrix.lane }}
+    needs: resolve
+    runs-on: ${{ matrix.runner }}
+    # The Windows guest is shared with every other repo's Windows jobs, and a
+    # cold engine build under that load has taken most of an hour.
+    timeout-minutes: ${{ matrix.lane == 'windows-x86_64' && 120 || 90 }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - lane: macos
+            runner: [self-hosted, macOS, ARM64]
+            target: aarch64-apple-darwin
+            extra_target: x86_64-apple-darwin
+            wedge_timeout: ''
+          # Native x86_64 under Rosetta: static musl needs an x86_64 musl C
+          # toolchain for ring, which only this pool's image carries.
+          - lane: linux-x86_64
+            runner: [self-hosted, Linux, X64, macstudio-rosetta]
+            target: x86_64-unknown-linux-musl
+            extra_target: ''
+            wedge_timeout: 70m
+          - lane: linux-aarch64
+            runner: [self-hosted, Linux, ARM64, macstudio-arm64]
+            target: aarch64-unknown-linux-musl
+            extra_target: ''
+            wedge_timeout: 70m
+          - lane: windows-x86_64
+            runner: [self-hosted, Windows, macstudio-win]
+            target: x86_64-pc-windows-msvc
+            extra_target: ''
+            wedge_timeout: ''
+    steps:
+      - name: Reset stale workspace
+        shell: bash
+        run: rm -rf .git sdk-ts warren-sdk-rs warrenguard warren-contract out 2>/dev/null || true
+      - uses: actions/checkout@v4
+        with:
+          path: sdk-ts
+      - uses: ./sdk-ts/.github/actions/engine-siblings
+        with:
+          token: ${{ secrets.ENGINE_TOKEN }}
+      - uses: dtolnay/rust-toolchain@1.91.0
+        with:
+          targets: ${{ matrix.extra_target && format('{0},{1}', matrix.target, matrix.extra_target) || matrix.target }}
+      - name: Rust targets for the crate's pinned toolchain
+        shell: bash
+        working-directory: sdk-ts/packages/extension/native-host
+        run: rustup target add ${{ matrix.target }} ${{ matrix.extra_target }}
+      - name: musl toolchain
+        if: contains(matrix.target, 'musl')
+        shell: bash
+        run: |
+          if command -v musl-gcc >/dev/null; then
+            echo "musl-gcc present"
+          else
+            sudo apt-get update -qq && sudo apt-get install -y --no-install-recommends musl-tools
+          fi
+      - name: Test, build and package
+        shell: bash
+        working-directory: sdk-ts/packages/extension/native-host
+        env:
+          WARREN_PRODUCT_ENV: ${{ needs.resolve.outputs.channel }}
+          CHANNEL: ${{ needs.resolve.outputs.channel }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+          LANE: ${{ matrix.lane }}
+          TARGET: ${{ matrix.target }}
+          EXTRA_TARGET: ${{ matrix.extra_target }}
+          WEDGE_TIMEOUT: ${{ matrix.wedge_timeout }}
+          # Target-scoped, so inert on every other lane.
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          # No MSVC runtime DLL to install: the downloaded .exe runs as is.
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          set -euo pipefail
+          if [ "$LANE" != windows-x86_64 ]; then
+            # Persistent cache outside _work, one per target (the runner GC
+            # wipes leaf target/ dirs in _work). On Windows a bash-shaped
+            # $HOME reaches cargo as a path it cannot resolve.
+            export CARGO_TARGET_DIR="$HOME/warren-host-target-$TARGET"
+          fi
+          # A wedged cargo under emulation prints nothing and waits forever;
+          # only `timeout` ends it (GNU coreutils: Linux lanes only).
+          cargo_ci() {
+            if [ -n "$WEDGE_TIMEOUT" ]; then
+              timeout -k 60s "$WEDGE_TIMEOUT" "$@" || { echo "::warning::retrying once: $*"; sleep 15; timeout -k 60s "$WEDGE_TIMEOUT" "$@"; }
+            else
+              "$@" || { echo "::warning::retrying once: $*"; sleep 15; "$@"; }
+            fi
+          }
+          exe=""; [ "$LANE" = windows-x86_64 ] && exe=".exe"
+          bin() { echo "${CARGO_TARGET_DIR:-target}/$1/release/warren-host$exe"; }
+          rm -f "$(bin "$TARGET")"
+          cargo_ci cargo test --locked --release --target "$TARGET"
+          cargo_ci cargo build --locked --release --target "$TARGET"
+          if [ -n "$EXTRA_TARGET" ]; then
+            rm -f "$(bin "$EXTRA_TARGET")"
+            cargo_ci cargo build --locked --release --target "$EXTRA_TARGET"
+          fi
+          main="$(bin "$TARGET")"
+          test -f "$main" || { echo "::error::no binary at $main"; exit 1; }
+          case "$TARGET" in
+            *-musl)
+              # A NEEDED entry is what a dynamic binary has; ldd is no check.
+              if readelf -d "$main" | grep -q NEEDED; then
+                echo "::error::the binary is dynamically linked"; readelf -d "$main"; exit 1
+              fi
+              ;;
+          esac
+          # The binary names the release and the channel it was built for.
+          line="$("$main" --version | tr -d '\r')"
+          [ "$line" = "warren-host $VERSION ($CHANNEL channel)" ] || { echo "::error::--version says: $line"; exit 1; }
+          out="$GITHUB_WORKSPACE/out"
+          mkdir -p "$out"
+          case "$LANE" in
+            macos)
+              sh scripts/build-macos-pkg.sh "$main" "$(bin "$EXTRA_TARGET")" "$VERSION" "$out"
+              arch -x86_64 "$out/warren-host-macos-universal" --version
+              ;;
+            linux-x86_64) cp "$main" "$out/warren-host-linux-x86_64" ;;
+            linux-aarch64) cp "$main" "$out/warren-host-linux-aarch64" ;;
+            windows-x86_64) cp "$main" "$out/Warren-Helper-Setup.exe" ;;
+          esac
+          ls -l "$out"
+      - uses: actions/setup-node@v4
+        if: needs.resolve.outputs.publish == 'true'
+        with:
+          node-version: 20
+      - name: Upload to the draft release
+        if: needs.resolve.outputs.publish == 'true'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          for file in "$GITHUB_WORKSPACE"/out/*; do
+            node sdk-ts/scripts/release-host.mjs upload "$RELEASE_ID" "$file"
+          done
+
+  publish:
+    name: Installers, checksums and publish
+    needs: [resolve, build]
+    if: needs.resolve.outputs.publish == 'true'
+    # The native pool: bulk transfers from the container pools crawl.
+    runs-on: [self-hosted, macOS, ARM64]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Installers with the tag written in
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          for f in install.sh install.ps1; do
+            sed "s/__WARREN_HOST_TAG__/${GITHUB_REF_NAME}/g" "packages/extension/native-host/installers/$f" > "out/$f"
+            ! grep -q __WARREN_HOST_TAG__ "out/$f"
+          done
+          sh -n out/install.sh
+      - name: Upload the installers, checksum everything, publish
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+        run: |
+          set -euo pipefail
+          node scripts/release-host.mjs upload "$RELEASE_ID" out/install.sh
+          node scripts/release-host.mjs upload "$RELEASE_ID" out/install.ps1
+          node scripts/release-host.mjs finalize "$RELEASE_ID"
+      - name: Every asset downloads anonymously and matches SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          dir="$(mktemp -d)"
+          curl -fsSL "$base/SHA256SUMS" -o "$dir/SHA256SUMS"
+          for asset in warren-host-macos-universal Warren-Helper.pkg warren-host-linux-x86_64 \
+                       warren-host-linux-aarch64 Warren-Helper-Setup.exe install.sh install.ps1; do
+            grep -q "  ${asset}\$" "$dir/SHA256SUMS" || { echo "::error::SHA256SUMS lacks $asset"; exit 1; }
+            curl -fsSL "$base/$asset" -o "$dir/$asset"
+          done
+          (cd "$dir" && shasum -a 256 -c SHA256SUMS)
+          rm -rf "$dir"
