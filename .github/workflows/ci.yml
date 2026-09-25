@@ -165,6 +165,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: sdk-ts
+          persist-credentials: false
       - uses: ./sdk-ts/.github/actions/engine-siblings
         with:
           token: ${{ secrets.ENGINE_TOKEN }}

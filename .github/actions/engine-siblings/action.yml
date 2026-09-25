@@ -37,6 +37,9 @@ runs:
         ref: ${{ steps.pin.outputs.sdk }}
         token: ${{ inputs.token }}
         path: warren-sdk-rs
+        # The build that follows runs every dependency's build script: leave
+        # no token in a git config it could read.
+        persist-credentials: false
     - name: Sibling revs the pinned engine names
       id: siblings
       shell: bash
@@ -50,12 +53,14 @@ runs:
         ref: ${{ steps.siblings.outputs.warrenguard }}
         token: ${{ inputs.token }}
         path: warrenguard
+        persist-credentials: false
     - uses: actions/checkout@v4
       with:
         repository: WarrenBrowse/warren-contract
         ref: ${{ steps.siblings.outputs.contract }}
         token: ${{ inputs.token }}
         path: warren-contract
+        persist-credentials: false
     - name: Point the crate at the checked-out engine
       shell: bash
       run: |
