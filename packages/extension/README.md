@@ -11,7 +11,10 @@ cannot proxy the whole browser. For the whole-browser VPN this package is built
 around, the split is: the **extension is the wallet** (the Warren account lives
 here, encrypted, exactly as MetaMask/Phantom keep a key), and a **local native
 messaging host** runs only the datapath, terminating the real multi-hop tunnel
-with `@warrenbrowse/sdk-node` and opening local SOCKS5 and HTTP proxy listeners.
+and opening local SOCKS5 and HTTP proxy listeners. The host users install is
+the **Warren helper** (`warren-host`), one self-contained binary that links the
+Rust engine directly (see [The helper](#the-helper-warren-host)); the Node host
+in `src/host` speaks the same protocol over `@warrenbrowse/sdk-node`.
 The extension routes the **whole browser** through them with `chrome.proxy` and
 closes the WebRTC leak. Scope is the browser only; for all-OS traffic use the system-VPN
 mode of `@warrenbrowse/sdk-node`.
@@ -159,53 +162,138 @@ treat the persisted proxy setting as ground truth, keep UI state in
 backoff when you need an always-on session. See [`example/`](./example) for a
 complete minimal extension.
 
-## Host side (Node, installed once per machine)
+## The helper (`warren-host`)
 
-The host holds **no identity**: the mnemonic comes from the extension vault at
-connect time, and the discovery pin is learned on first use (TOFU), so the host
-needs no secrets. It only needs Node reachable by the launcher and, optionally,
-a persistent state dir.
+The shipped native messaging host is `warren-host`, the crate in
+[`native-host/`](./native-host): one binary with the engine (`warren-sdk`)
+linked in, so it needs no Node, no clone and no build on the user's machine. It
+speaks protocol version 3 exactly like the Node host below, always answers
+`hello` with `datapath: "ready"`, and installs itself per user without
+administrator rights.
+
+### Installing it
+
+Every route runs the same `warren-host install`, which copies the binary to the
+per-user location and registers `com.warrenbrowse.host` with every browser
+profile it finds (Chrome, Chromium, Brave, Edge, Vivaldi, Opera, Arc on macOS,
+Firefox, LibreWolf; all of them when none is found yet):
 
 ```bash
-# host.env holds NO mnemonic. Only launcher/runtime knobs.
-mkdir -p ~/.warren/state && cat > ~/.warren/host.env <<'EOF'
-export WARREN_STATE_DIR="$HOME/.warren/state"   # persist anti-rollback + TOFU pin
-# export WARREN_NODE="/path/to/node"            # if node is not on the minimal PATH
-# export WARREN_ALLOWED_ORIGINS="<ext-id>"      # pin which extension may drive the host
-EOF
-chmod 600 ~/.warren/host.env
-
-# register the native messaging manifest for your extension id
-node scripts/install-host.mjs --extension-id <your-extension-id>
+# macOS and Linux
+curl -fsSL https://github.com/WarrenBrowse/warren-sdk-ts/releases/download/<TAG>/install.sh | sh
 ```
 
-The host entry is `@warrenbrowse/sdk-extension/host`:
+```powershell
+# Windows
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/WarrenBrowse/warren-sdk-ts/releases/download/<TAG>/install.ps1 | iex"
+```
+
+Or download from the release and open it: `Warren-Helper-Setup.exe` on Windows
+(a double-click installs it and waits for Enter), `Warren-Helper.pkg` on macOS
+(unsigned for now, so Gatekeeper wants a right click, Open; its postinstall
+runs `warren-host install` as the logged-in user). `<TAG>` is the release tag,
+for example `host-beta-v0.1.0`. Both scripts refuse a binary whose SHA256 does
+not match the release's `SHA256SUMS`.
+
+| | macOS | Linux | Windows |
+|---|---|---|---|
+| binary | `~/Library/Application Support/Warren/Helper/warren-host` | `${XDG_DATA_HOME:-~/.local/share}/warren/helper/warren-host` | `%LOCALAPPDATA%\Warren\Helper\warren-host.exe` |
+| manifests | each browser's `NativeMessagingHosts` directory | same | two JSON files next to the binary, named by `HKCU\Software\<vendor>\NativeMessagingHosts\com.warrenbrowse.host` |
+
+`warren-host uninstall` removes the binary, every manifest and registry key,
+and its state; `warren-host status` lists where it is registered;
+`warren-host --version` prints the version and the build's channel.
+
+### Who may call it
+
+Browsers pass the caller to the host: Chromium its origin
+(`chrome-extension://<id>/`), Firefox the manifest path and the add-on id. The
+helper serves only the extension ids baked for its build's channel (beta:
+`dgkleicjbkfinjhhhmalipaepnlchfib` and `vpn-beta@warrenbrowse.com`; prod:
+`icngiamijikflhcilcgfpeipelhomldk` and `vpn@warrenbrowse.com`) plus the ids
+recorded at install time for development builds:
+
+```bash
+warren-host install --extension-id <chromium id> --gecko-id <id@domain>
+```
+
+The API it reaches is the one of the channel the extension names at `hello`;
+a `hello` without a channel gets the build's own (`WARREN_PRODUCT_ENV` at
+compile time, prod by default). Anti-rollback floors persist per channel under
+the helper's `state/` directory. The mnemonic arrives in a `connect` or
+`account` request, is used and wiped, and is never stored or logged.
+
+### Building the helper
+
+`native-host/Cargo.toml` pins `warren-sdk` to the same warren-sdk-rs commit as
+the napi addon, and its `[patch]` table resolves the engine crates from the
+sibling checkouts `../warrenguard` and `../warren-contract`, which must sit at
+the revs that commit names. To build from local checkouts, add the gitignored
+override (the one CI writes in `.github/actions/engine-siblings`):
+
+```bash
+cd native-host
+mkdir -p .cargo
+printf '%s\n' '[patch."https://github.com/WarrenBrowse/warren-sdk-rs.git"]' \
+  'warren-sdk = { path = "../../../../warren-sdk-rs/crates/warren-sdk" }' > .cargo/config.toml
+cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
+WARREN_PRODUCT_ENV=beta cargo build --release
+node validate-egress.mjs target/release/warren-host   # WARREN_MNEMONIC=... adds the live tunnel part
+```
+
+`cargo test` drives the session against a fake tunnel, the stdio loop over
+in-memory pipes, the built binary over real framing, and `install` /
+`uninstall` into a temporary home directory. `validate-egress.mjs` launches the
+binary as Chromium does and runs `hello` and `exits`, then, with
+`WARREN_MNEMONIC` set, `account`, `connect`, an authenticated SOCKS5 CONNECT
+through the tunnel and `disconnect`.
+
+### Releases
+
+`.github/workflows/release-host.yml` publishes one channel per tag:
+`host-beta-vX.Y.Z` a beta prerelease, `host-vX.Y.Z` a prod release. The version
+must equal the crate's and be the highest of its own series, and the commit
+must be on `main` with a green CI run. Assets: `warren-host-macos-universal`,
+`Warren-Helper.pkg`, `warren-host-linux-x86_64` and `warren-host-linux-aarch64`
+(static musl), `Warren-Helper-Setup.exe`, `install.sh`, `install.ps1` and
+`SHA256SUMS`. `workflow_dispatch` is a dry run that builds every lane.
+
+## Node host (`@warrenbrowse/sdk-extension/host`)
+
+The same protocol served from Node over `@warrenbrowse/sdk-node`, for SDK
+consumers that run the host in their own Node process. The extension product
+installs the helper above instead. The Node host needs the
+`@warrenbrowse/sdk-node` native addon (see
+[`packages/node/native`](../node/native)) and reports its state at `hello`
+(`missing` or `outdated` when the addon is absent or from another SDK).
 
 ```ts
 import { configFromEnv, runNativeHost } from '@warrenbrowse/sdk-extension/host';
 await runNativeHost(configFromEnv());
 ```
 
-It requires the `@warrenbrowse/sdk-node` native addon (see
-[`packages/node/native`](../node/native)). `WARREN_ALLOWED_ORIGINS`
-(comma-separated extension ids / gecko ids) pins which extension may drive the
-host: the native-messaging manifest is per-browser, and the browser passes the
-caller's origin to the host, the only per-caller gate available.
+For development, `node scripts/install-host.mjs --extension-id <id>` registers
+the Node launcher (`scripts/warren-host-launcher.sh`, which reads
+`~/.warren/host.env`). `WARREN_ALLOWED_ORIGINS` (comma-separated extension ids
+or gecko ids) pins which extension may drive it, and `WARREN_STATE_DIR`
+persists its anti-rollback floors.
 
 ## Protocol
 
-Version-1 JSON messages over native messaging (Chrome frames them; the host
-speaks the 4-byte little-endian stdio framing): `hello` (version handshake, no
-identity), `status`, `connect {mnemonic, selector?, entrySelector?, daita?,
-httpProxy?}` (`entrySelector` picks the multihop entry country, always a node
-distinct from the exit), `disconnect`,
-`exits` (the verified relay-list locations, for a location picker), `account
-{mnemonic}` (signed subscription lookup, returns `expiresAt`), plus unsolicited
-`{type: 'state'}` events. The mnemonic crosses only this local
-IPC, never a page or the network. Typed errors: `WarrenExtensionError` with
-codes `host_unavailable | protocol | host | already_connected | not_connected |
-proxy_uncontrollable | private_browsing_required` (host-reported failures keep
-their own code in `hostCode`).
+Version-3 JSON messages over native messaging (Chrome frames them; the host
+speaks the 4-byte little-endian stdio framing): `hello {protocol, channel?}`
+(version handshake naming the extension's channel, no identity; the answer
+carries `datapath`), `status`, `connect {mnemonic, selector?, entrySelector?,
+daita?, httpProxy?}` (`entrySelector` picks the multihop entry country, always a
+node distinct from the exit; the answer carries the listener credentials),
+`disconnect`, `exits` (the verified relay-list locations, for a location
+picker), `account {mnemonic}` (signed subscription lookup, returns
+`expiresAt`), plus unsolicited `{type: 'state'}` events. The mnemonic crosses
+only this local IPC, never a page or the network. Typed errors:
+`WarrenExtensionError` with codes `host_unavailable | protocol | host |
+already_connected | not_connected | proxy_uncontrollable |
+private_browsing_required` (host-reported failures keep their own code in
+`hostCode`).
 
 ## EdgeConnect (browser WebTransport tier)
 
@@ -235,25 +323,20 @@ pnpm build && pnpm build:example
 #    first load: create or import your Warren wallet (this sets the password
 #    that encrypts the vault). No CLI, no mnemonic on disk.
 
-# 3. host env (NO mnemonic, NO pin: the wallet is in the extension, the pin is TOFU)
-mkdir -p ~/.warren/state && cat > ~/.warren/host.env <<'EOF'
-export WARREN_STATE_DIR="$HOME/.warren/state"
-# export WARREN_NODE="/path/to/node"   # if node is not on the browser's minimal PATH
-EOF
-chmod 600 ~/.warren/host.env
+# 3. install the helper and let it serve this extension id too (the helper
+#    only serves the product's own ids otherwise). From a release, or from a
+#    local build (see "Building the helper"):
+curl -fsSL https://github.com/WarrenBrowse/warren-sdk-ts/releases/download/<TAG>/install.sh \
+  | sh -s -- --extension-id <the-id-from-step-2>
 
-# 4. register the native host for that extension id (writes the manifest for
-#    Chrome, Chromium, Brave and Edge; add --gecko-id <id@domain> for Firefox)
-node scripts/install-host.mjs --extension-id <the-id-from-step-2>
+# 4. nothing to configure: no mnemonic, no pin, no Node on the browser's PATH.
 
 # 5. restart the browser fully, click the extension icon, unlock, Connect.
 ```
 
-Requirements: the `@warrenbrowse/sdk-node` native addon built locally (see
-[`packages/node/native`](../node/native)), and Node resolvable by the launcher
-(browsers spawn hosts with a minimal PATH; set `WARREN_NODE=/path/to/node` in
-`~/.warren/host.env` if you use nvm or a non-Homebrew install). Debug tip: run
-the browser from a terminal to see the host's stderr, and check
+The Node host still works for this walkthrough (`node scripts/install-host.mjs
+--extension-id <id>` with the native addon built, see "Node host" above).
+Debug tip: run the browser from a terminal to see the host's stderr, and check
 `brave://extensions` -> the extension's "Errors" panel for
 `Specified native messaging host not found` (manifest not seen: wrong
 directory or the browser was not fully restarted).
@@ -274,10 +357,10 @@ to `proxy_uncontrollable`. The example manifest carries the required
 `browser_specific_settings.gecko` keys (id, `strict_min_version`, AMO
 `data_collection_permissions`) and declares `background.scripts` alongside
 `service_worker` (Firefox runs an event page, not a worker; Firefox 121+
-accepts both keys). Register the host with
-`node scripts/install-host.mjs --gecko-id warren-example@warrenbrowse.com`
-(Firefox manifests use `allowed_extensions` under the Mozilla paths, and the
-host receives the gecko id in argv, matched by `WARREN_ALLOWED_ORIGINS`).
+accepts both keys). Let the helper serve the example with
+`warren-host install --gecko-id warren-example@warrenbrowse.com` (Firefox
+manifests use `allowed_extensions` under the Mozilla paths, and the host
+receives the gecko id in argv, matched against the ids the helper trusts).
 
 ## Validation
 
