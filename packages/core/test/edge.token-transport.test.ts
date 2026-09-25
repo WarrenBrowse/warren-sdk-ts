@@ -2,11 +2,13 @@ import { hexToBytes } from '@noble/hashes/utils';
 import { base64urlnopad } from '@scure/base';
 import { describe, expect, it } from 'vitest';
 import {
+  BLINDING_PURPOSE_SESSION,
   type HttpRequest,
   type HttpResponse,
   type HttpTransport,
   WarrenApiClient,
   acquireTokens,
+  blindingKeyFromSeed,
 } from '../src/index.js';
 
 const SEED = hexToBytes('42'.repeat(32));
@@ -115,6 +117,7 @@ describe('WarrenApiClient token transport + acquireTokens (end-to-end)', () => {
     const { epoch, tokens } = await acquireTokens(client.tokenTransport(), {
       nowUnixSecs: NOW,
       count: 2,
+      blindingKey: blindingKeyFromSeed(SEED, BLINDING_PURPOSE_SESSION),
     });
 
     expect(epoch).toBe(EPOCH);

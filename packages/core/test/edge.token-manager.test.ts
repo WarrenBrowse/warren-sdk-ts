@@ -2,6 +2,8 @@ import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { base64urlnopad } from '@scure/base';
 import { describe, expect, it } from 'vitest';
 import {
+  BLINDING_PURPOSE_BROWSER_PROXY,
+  BLINDING_PURPOSE_SESSION,
   InMemoryTokenPersistence,
   type TokenIssueRequest,
   type TokenIssueResponse,
@@ -9,6 +11,7 @@ import {
   TokenManager,
   type TokenPersistence,
   type TokenTransport,
+  WarrenEdgeError,
   blindingKeyFromSeed,
 } from '../src/index.js';
 
@@ -25,6 +28,8 @@ const KEY_ID = 'ad4229a4eea9ada97d55c227b90f95c33b021890b8a7c2a52312062f12d55809
 const EPOCH_SECS = 86400;
 const EPOCH = 42;
 const NOW = EPOCH * EPOCH_SECS + 10;
+/** The session blinding key of a test wallet: every minting manager needs one. */
+const SESSION_KEY = blindingKeyFromSeed(new Uint8Array(32).fill(3), BLINDING_PURPOSE_SESSION);
 
 function os2ip(b: Uint8Array): bigint {
   let n = 0n;
@@ -133,7 +138,11 @@ const offlineTransport: TokenTransport = {
 describe('TokenManager mint timing (decorrelated from redemption)', () => {
   it('mints every published epoch ahead of need; takeCurrentStack pops without minting', async () => {
     const counts = new Map<number, number>();
-    const mgr = new TokenManager(fakeTransport({ epochs: [EPOCH, EPOCH + 1], counts }));
+    const mgr = new TokenManager(
+      fakeTransport({ epochs: [EPOCH, EPOCH + 1], counts }),
+      new InMemoryTokenPersistence(),
+      SESSION_KEY,
+    );
 
     await mgr.refresh(NOW);
     // Both the current and the prefetched next epoch were minted up front.
@@ -153,7 +162,11 @@ describe('TokenManager mint timing (decorrelated from redemption)', () => {
 
   it('returns an empty stack (never mints) when the epoch is exhausted', async () => {
     const counts = new Map<number, number>();
-    const mgr = new TokenManager(fakeTransport({ epochs: [EPOCH], quota: 1, counts }));
+    const mgr = new TokenManager(
+      fakeTransport({ epochs: [EPOCH], quota: 1, counts }),
+      new InMemoryTokenPersistence(),
+      SESSION_KEY,
+    );
     await mgr.refresh(NOW);
     expect(mgr.takeCurrentStack(NOW)).toHaveLength(1);
     // Exhausted: an empty stack, and still no mint at connect.
@@ -167,7 +180,11 @@ describe('TokenManager mint timing (decorrelated from redemption)', () => {
   });
 
   it('reports the epoch a moment falls in, so a caller can cache what it spent', async () => {
-    const mgr = new TokenManager(fakeTransport({ epochs: [EPOCH], counts: new Map() }));
+    const mgr = new TokenManager(
+      fakeTransport({ epochs: [EPOCH], counts: new Map() }),
+      new InMemoryTokenPersistence(),
+      SESSION_KEY,
+    );
     expect(mgr.epochAt(NOW)).toBeUndefined();
     await mgr.refresh(NOW);
     expect(mgr.epochAt(NOW)).toBe(EPOCH);
@@ -184,6 +201,8 @@ describe('TokenManager settle ledger (matches the corrected core policy)', () =>
         counts,
         behavior: (epoch) => (epoch === EPOCH + 1 ? 'already_issued' : 'sign'),
       }),
+      new InMemoryTokenPersistence(),
+      SESSION_KEY,
     );
 
     await mgr.refresh(NOW);
@@ -205,6 +224,8 @@ describe('TokenManager settle ledger (matches the corrected core policy)', () =>
         counts,
         behavior: (_epoch, call) => (call === 1 ? 'throw' : 'sign'),
       }),
+      new InMemoryTokenPersistence(),
+      SESSION_KEY,
     );
 
     await mgr.refresh(NOW);
@@ -226,6 +247,8 @@ describe('TokenManager settle ledger (matches the corrected core policy)', () =>
         counts,
         behavior: (_epoch, call) => (call === 1 ? 'not_subscribed' : 'sign'),
       }),
+      new InMemoryTokenPersistence(),
+      SESSION_KEY,
     );
 
     await mgr.refresh(NOW);
@@ -242,7 +265,11 @@ describe('TokenManager persistence', () => {
   it('round-trips the store and survives a restart with no network', async () => {
     const counts = new Map<number, number>();
     const persistence = new InMemoryTokenPersistence();
-    const mgr = new TokenManager(fakeTransport({ epochs: [EPOCH], counts }), persistence);
+    const mgr = new TokenManager(
+      fakeTransport({ epochs: [EPOCH], counts }),
+      persistence,
+      SESSION_KEY,
+    );
     await mgr.refresh(NOW);
     expect(mgr.available(EPOCH)).toBe(2);
 
@@ -262,7 +289,11 @@ describe('TokenManager persistence', () => {
 
   it('prunes spent epochs on refresh', async () => {
     const counts = new Map<number, number>();
-    const mgr = new TokenManager(fakeTransport({ epochs: [EPOCH], counts }));
+    const mgr = new TokenManager(
+      fakeTransport({ epochs: [EPOCH], counts }),
+      new InMemoryTokenPersistence(),
+      SESSION_KEY,
+    );
     await mgr.refresh(NOW);
     expect(mgr.available(EPOCH)).toBe(2);
 
@@ -281,18 +312,21 @@ describe('TokenManager persistence', () => {
 });
 
 describe('recovering a lost store inside the epoch', () => {
-  const KEY = blindingKeyFromSeed(new Uint8Array(32).fill(3), 'browser-proxy');
+  const KEY = blindingKeyFromSeed(new Uint8Array(32).fill(3), BLINDING_PURPOSE_BROWSER_PROXY);
 
-  it('leaves the epoch lost when the batch came from the CSPRNG', async () => {
-    // The issuer signed this account's epoch once and refuses any other batch
-    // for it, so a wiped store cannot be rebuilt: this is the defect the
-    // wallet-derived batch exists to remove.
-    const cfg = { epochs: [EPOCH], counts: new Map<number, number>(), ledger: new Map() };
-    await new TokenManager(fakeTransport(cfg), new InMemoryTokenPersistence()).refresh(NOW);
+  it('refuses to mint without a wallet blinding key, before any network call', async () => {
+    // A batch drawn from the CSPRNG reserves the account's epoch at the issuer
+    // and locks every other client of the wallet out of it for the epoch, so a
+    // manager with no key must never send one.
+    const counts = new Map<number, number>();
+    const mgr = new TokenManager(fakeTransport({ epochs: [EPOCH], counts }));
 
-    const reinstalled = new TokenManager(fakeTransport(cfg), new InMemoryTokenPersistence());
-    await reinstalled.refresh(NOW);
-    expect(reinstalled.available(EPOCH)).toBe(0);
+    const err = await mgr.refresh(NOW).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(WarrenEdgeError);
+    expect((err as WarrenEdgeError).code).toBe('no_blinding_key');
+    expect(counts.size).toBe(0);
+    expect(mgr.available(EPOCH)).toBe(0);
   });
 
   it('re-derives the very same credentials from the wallet, so a reinstall costs nothing', async () => {
@@ -311,13 +345,138 @@ describe('recovering a lost store inside the epoch', () => {
     );
   });
 
+  it('serves every session client of one wallet the same batch in the same epoch', async () => {
+    // The desktop app and the Rust SDK mint this class from the same wallet
+    // with the same label: whichever refreshes first, the other is re-served.
+    const cfg = { epochs: [EPOCH], counts: new Map<number, number>(), ledger: new Map() };
+    const seed = new Uint8Array(32).fill(9);
+    const desktop = new TokenManager(
+      fakeTransport(cfg),
+      new InMemoryTokenPersistence(),
+      blindingKeyFromSeed(seed, BLINDING_PURPOSE_SESSION),
+    );
+    const browser = new TokenManager(
+      fakeTransport(cfg),
+      new InMemoryTokenPersistence(),
+      blindingKeyFromSeed(new Uint8Array(seed), BLINDING_PURPOSE_SESSION),
+    );
+
+    await desktop.refresh(NOW);
+    await browser.refresh(NOW);
+
+    expect(browser.available(EPOCH)).toBe(2);
+    expect(browser.sessionStack(NOW).map(bytesToHex).sort()).toEqual(
+      desktop.sessionStack(NOW).map(bytesToHex).sort(),
+    );
+  });
+
   it('is refused when another wallet holds the epoch, so the cap is not a door', async () => {
     const cfg = { epochs: [EPOCH], counts: new Map<number, number>(), ledger: new Map() };
     await new TokenManager(fakeTransport(cfg), new InMemoryTokenPersistence(), KEY).refresh(NOW);
 
-    const other = blindingKeyFromSeed(new Uint8Array(32).fill(4), 'browser-proxy');
+    const other = blindingKeyFromSeed(new Uint8Array(32).fill(4), BLINDING_PURPOSE_BROWSER_PROXY);
     const intruder = new TokenManager(fakeTransport(cfg), new InMemoryTokenPersistence(), other);
     await intruder.refresh(NOW);
     expect(intruder.available(EPOCH)).toBe(0);
+  });
+});
+
+describe('TokenManager session stack', () => {
+  // Every client of a wallet holds the same batch in the same order, and an
+  // exit leases a serial to one live session in the whole fleet, so a session
+  // is handed the whole current epoch to walk rather than one popped token.
+
+  /** A well-formed token whose nonce starts with `marker`, so each marker has
+   * its own serial. */
+  function token(marker: number): Uint8Array {
+    const bytes = new Uint8Array(354);
+    bytes[1] = 0x02;
+    bytes[2] = marker;
+    return bytes;
+  }
+
+  function stocked(
+    byEpoch: Record<number, number[]>,
+    options?: { rotation?: number },
+  ): { mgr: TokenManager; persistence: InMemoryTokenPersistence } {
+    const persistence = new InMemoryTokenPersistence();
+    const epochs: Record<string, string[]> = {};
+    for (const [epoch, markers] of Object.entries(byEpoch)) {
+      epochs[epoch] = markers.map((m) => base64urlnopad.encode(token(m)));
+    }
+    persistence.save(JSON.stringify({ v: 1, epochSecs: EPOCH_SECS, epochs }));
+    return {
+      mgr: new TokenManager(offlineTransport, persistence, SESSION_KEY, options),
+      persistence,
+    };
+  }
+
+  const markers = (stack: Uint8Array[]) => stack.map((t) => t[2]);
+
+  it('carries every current token and consumes none', () => {
+    const { mgr, persistence } = stocked({ [EPOCH]: [1, 2, 3] }, { rotation: 0 });
+    const before = persistence.load();
+
+    expect(markers(mgr.sessionStack(NOW))).toEqual([1, 2, 3]);
+    expect(markers(mgr.sessionStack(NOW))).toEqual([1, 2, 3]);
+    expect(mgr.available(EPOCH)).toBe(3);
+    expect(persistence.load()).toBe(before);
+  });
+
+  it('starts at the manager rotation', () => {
+    const { mgr } = stocked({ [EPOCH]: [1, 2, 3] }, { rotation: 4 });
+
+    expect(markers(mgr.sessionStack(NOW))).toEqual([2, 3, 1]);
+  });
+
+  it('does not send every manager of one wallet to the same lead token', () => {
+    const leads = new Set<number | undefined>();
+    for (let i = 0; i < 64; i++) {
+      leads.add(stocked({ [EPOCH]: [1, 2, 3] }).mgr.sessionStack(NOW)[0]?.[2]);
+    }
+
+    expect(leads.size).toBeGreaterThan(1);
+  });
+
+  it('holds only the epoch the moment falls in', () => {
+    const { mgr } = stocked({ [EPOCH]: [1, 2], [EPOCH + 1]: [7, 8] }, { rotation: 0 });
+
+    expect(markers(mgr.sessionStack(NOW + EPOCH_SECS))).toEqual([7, 8]);
+  });
+
+  it('is empty before the manager knows the epoch length', () => {
+    const mgr = new TokenManager(offlineTransport, new InMemoryTokenPersistence(), SESSION_KEY);
+
+    expect(mgr.sessionStack(NOW)).toEqual([]);
+  });
+
+  it('leaves out a serial a live session holds until it is released', () => {
+    const { mgr } = stocked({ [EPOCH]: [1, 2, 3] }, { rotation: 0 });
+    const lease = mgr.claim(token(2));
+    expect(lease).toBeDefined();
+
+    expect(markers(mgr.sessionStack(NOW))).toEqual([1, 3]);
+    lease?.release();
+    expect(markers(mgr.sessionStack(NOW))).toEqual([1, 2, 3]);
+  });
+
+  it('claims a held serial again only once it is released, and a second release is inert', () => {
+    const { mgr } = stocked({ [EPOCH]: [1] });
+    const first = mgr.claim(token(1));
+
+    expect(first).toBeDefined();
+    expect(mgr.claim(token(1))).toBeUndefined();
+    first?.release();
+    const second = mgr.claim(token(1));
+    expect(second).toBeDefined();
+    first?.release();
+    expect(mgr.claim(token(1))).toBeUndefined();
+  });
+
+  it('never claims bytes that are no token', () => {
+    const { mgr } = stocked({ [EPOCH]: [1] });
+
+    expect(mgr.claim(new Uint8Array(354))).toBeUndefined();
+    expect(mgr.claim(token(1).subarray(0, 353))).toBeUndefined();
   });
 });

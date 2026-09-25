@@ -431,6 +431,18 @@ export class Token {
   }
 }
 
+/**
+ * The redemption serial of a serialized token, `SHA-256(token_input)` (the
+ * Rust `Token::serial`): the key an exit leases one live session per, fleet
+ * wide. `undefined` when `bytes` is not a well-formed token (wrong length or
+ * token type). A bearer-derived value: never log it.
+ */
+export function tokenSerial(bytes: Uint8Array): Uint8Array | undefined {
+  if (bytes.length !== TOKEN_LEN) return undefined;
+  if (((bytes[0] ?? 0) << 8) + (bytes[1] ?? 0) !== TOKEN_TYPE_BLIND_RSA) return undefined;
+  return sha256(bytes.subarray(0, 2 + NONCE_LEN + CHALLENGE_DIGEST_LEN + TOKEN_KEY_ID_LEN));
+}
+
 function randomBytes(n: number): Uint8Array {
   const out = new Uint8Array(n);
   globalThis.crypto.getRandomValues(out);

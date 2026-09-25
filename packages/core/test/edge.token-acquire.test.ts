@@ -9,6 +9,7 @@ import {
   type TokenTransport,
   acquireTokens,
 } from '../src/edge/token-acquire.js';
+import { BLINDING_PURPOSE_SESSION, blindingKeyFromSeed } from '../src/edge/token-blinding.js';
 import { issuerPublicKeyFromSpki } from '../src/edge/token.js';
 
 // The FIXED test issuer key (warrenguard-token `IssuerSecretKey::generate(seed
@@ -22,6 +23,7 @@ const SPKI_HEX =
 const KEY_ID = 'ad4229a4eea9ada97d55c227b90f95c33b021890b8a7c2a52312062f12d55809';
 const EPOCH_SECS = 86400;
 const EPOCH = 42;
+const BLINDING_KEY = blindingKeyFromSeed(new Uint8Array(32).fill(5), BLINDING_PURPOSE_SESSION);
 
 function os2ip(bytes: Uint8Array): bigint {
   let n = 0n;
@@ -109,6 +111,7 @@ describe('acquireTokens (v7 session-token acquisition flow)', () => {
     const { epoch, tokens } = await acquireTokens(fakeTransport(), {
       nowUnixSecs: EPOCH * EPOCH_SECS + 10,
       count: 2,
+      blindingKey: BLINDING_KEY,
     });
     expect(epoch).toBe(EPOCH);
     expect(tokens).toHaveLength(2);
@@ -120,8 +123,32 @@ describe('acquireTokens (v7 session-token acquisition flow)', () => {
       expect(bytes[1]).toBe(0x02);
       expect(bytesToHex(bytes.subarray(66, 98))).toBe(KEY_ID);
     }
-    // Two distinct random blinds/nonces -> two distinct tokens.
+    // Each slot draws its own material -> two distinct tokens.
     expect(bytesToHex(tokens[0]!.serialize())).not.toBe(bytesToHex(tokens[1]!.serialize()));
+  });
+
+  it('rebuilds the identical batch from the same wallet, so the issuer re-serves it', async () => {
+    const sent: string[][] = [];
+    const base = fakeTransport();
+    const recording: TokenTransport = {
+      getDirectory: base.getDirectory,
+      async issue(request) {
+        sent.push(request.epochs[0]?.blinded ?? []);
+        return base.issue(request);
+      },
+    };
+    const opts = { nowUnixSecs: EPOCH * EPOCH_SECS + 10, count: 2 };
+
+    const first = await acquireTokens(recording, { ...opts, blindingKey: BLINDING_KEY });
+    const again = await acquireTokens(recording, {
+      ...opts,
+      blindingKey: blindingKeyFromSeed(new Uint8Array(32).fill(5), BLINDING_PURPOSE_SESSION),
+    });
+
+    expect(sent[1]).toEqual(sent[0]);
+    expect(again.tokens.map((t) => bytesToHex(t.serialize()))).toEqual(
+      first.tokens.map((t) => bytesToHex(t.serialize())),
+    );
   });
 
   it('rejects an epoch the issuer refused', async () => {
@@ -132,7 +159,11 @@ describe('acquireTokens (v7 session-token acquisition flow)', () => {
         return { epochs: [{ epoch: EPOCH, issued: false, reject_reason: 'quota_exhausted' }] };
       },
     };
-    const promise = acquireTokens(transport, { nowUnixSecs: EPOCH * EPOCH_SECS, count: 1 });
+    const promise = acquireTokens(transport, {
+      nowUnixSecs: EPOCH * EPOCH_SECS,
+      count: 1,
+      blindingKey: BLINDING_KEY,
+    });
     await expect(promise).rejects.toThrow(/quota_exhausted/);
     const err = await promise.catch((e) => e);
     expect(err).toBeInstanceOf(WarrenEdgeError);

@@ -119,9 +119,13 @@ export function currentEpoch(directory: TokenIssuerDirectory, nowUnixSecs: numbe
  * manager fetch the directory once and mint several prefetch epochs from it,
  * matching the Rust `mint_tokens` shape.
  *
- * With a `blindingKey` the batch is derived from the wallet rather than the
- * CSPRNG ({@link deterministicTokenRandom}), so a client that lost its store
- * re-asks for the credentials it already owns instead of waiting the epoch out.
+ * The batch is derived from the wallet through `blindingKey`
+ * ({@link blindingKeyFromSeed} with the class's purpose), never from the
+ * CSPRNG: the issuer signs one batch per account, class and epoch and serves
+ * that same batch again to whoever sends it bit for bit, so every client of a
+ * wallet (the desktop app, the Rust SDK, a reinstall that lost its store) must
+ * build the identical one. A random batch would reserve the epoch and lock the
+ * wallet's other clients out of it.
  *
  * @throws {WarrenEdgeError} `epoch_rejected` (carrying the issuer's
  * `rejectReason`) if the issuer refused the epoch; `token_issuer` if the
@@ -132,7 +136,7 @@ export async function mintEpoch(
   directory: TokenIssuerDirectory,
   epoch: number,
   count: number,
-  blindingKey?: Uint8Array,
+  blindingKey: Uint8Array,
 ): Promise<Token[]> {
   const pk = issuerKeyForEpoch(directory, epoch);
   const wanted = Math.min(count, directory.quota_per_epoch);
@@ -145,12 +149,9 @@ export async function mintEpoch(
   const blindedB64: string[] = [];
   const states: TokenClientState[] = [];
   for (let i = 0; i < wanted; i++) {
-    const { blindedRequest, state } =
-      blindingKey === undefined
-        ? blindToken(pk, challengeDigest)
-        : blindToken(pk, challengeDigest, {
-            random: deterministicTokenRandom(blindingKey, epoch, i),
-          });
+    const { blindedRequest, state } = blindToken(pk, challengeDigest, {
+      random: deterministicTokenRandom(blindingKey, epoch, i),
+    });
     blindedB64.push(base64urlnopad.encode(blindedRequest));
     states.push(state);
   }
@@ -181,7 +182,8 @@ export async function mintEpoch(
 
 /**
  * Acquires up to `count` session tokens for the epoch `nowUnixSecs` falls in:
- * fetches the directory, then mints that single epoch ({@link mintEpoch}).
+ * fetches the directory, then mints that single epoch ({@link mintEpoch})
+ * from the wallet-derived `blindingKey`.
  *
  * The returned tokens' `serialize()` bytes are the 354-byte `SessionToken`s an
  * `IpRequestV7` carries (`WarrenEdgeConnection.openTunnel`).
@@ -195,7 +197,7 @@ export async function mintEpoch(
  */
 export async function acquireTokens(
   transport: TokenTransport,
-  opts: { nowUnixSecs: number; count?: number },
+  opts: { nowUnixSecs: number; count?: number; blindingKey: Uint8Array },
 ): Promise<{ epoch: number; tokens: Token[] }> {
   const directory = await transport.getDirectory();
   const epoch = currentEpoch(directory, opts.nowUnixSecs);
@@ -204,6 +206,7 @@ export async function acquireTokens(
     directory,
     epoch,
     opts.count ?? directory.quota_per_epoch,
+    opts.blindingKey,
   );
   return { epoch, tokens };
 }

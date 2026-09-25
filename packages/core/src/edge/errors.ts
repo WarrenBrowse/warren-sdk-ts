@@ -8,6 +8,10 @@ export type WarrenEdgeErrorCode =
   | 'token_issuer'
   /** The issuer rejected the current epoch (quota exhausted, unknown epoch). */
   | 'epoch_rejected'
+  /** A token manager was asked to mint without a wallet blinding key. A batch
+   * drawn from the CSPRNG would reserve the account's epoch and lock every
+   * other client of the wallet out of it, so none is ever sent. */
+  | 'no_blinding_key'
   /** The WebTransport handshake or transport to the edge failed. */
   | 'handshake';
 

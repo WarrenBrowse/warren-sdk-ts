@@ -46,8 +46,17 @@ TLS-over-HTTP/3, the nested-TLS shape the native path avoids) and it does
 **not** replace the native tunnel; use it only where a page or extension
 genuinely cannot run the native datapath.
 
-`acquireTokens` mints the Privacy Pass session tokens (RFC 9578) an `IpRequestV7`
-control message carries; `WARREN_EDGE_PORT` (8443) is the well-known port every edge
+`TokenManager` (and the one-shot `acquireTokens`) mints the Privacy Pass session
+tokens (RFC 9578) an `IpRequestV7` control message carries. Every batch derives
+from the wallet: pass `blindingKeyFromSeed(seed, BLINDING_PURPOSE_SESSION)` for the
+session class and `BLINDING_PURPOSE_BROWSER_PROXY` for the browser-proxy class,
+the labels the Rust SDK and the desktop app use (`vectors/token_blinding_v1.json`).
+The issuer signs one batch per account, class and epoch and serves it again only
+to a client sending it bit for bit, so a batch from the CSPRNG would lock the
+wallet's other clients out for the epoch; a manager without a key refuses to
+mint. A session walks `TokenManager.sessionStack(now)` (every current token, in a
+per-manager rotation, minus the serials `claim` holds), one token per dial,
+moving on when the exit refuses a serial another session holds. `WARREN_EDGE_PORT` (8443) is the well-known port every edge
 listens on, and `VerifiedExit.edgeCertSha256` (from the verified multi-hop
 directory) is the ephemeral cert pin for the zero-config production path. The
 actual WebTransport transport (which needs browser-only APIs) lives in

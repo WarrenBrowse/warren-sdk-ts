@@ -21,6 +21,13 @@ identity seed: signed calls (subscription, session, payments, deletion) belong o
 a backend using `@warrenbrowse/sdk-node` or `@warrenbrowse/sdk-core`. An advanced
 non-custodial wallet can still import `@warrenbrowse/sdk-core` directly.
 
+It cannot mint anonymous tokens either. Issuance is wallet-signed and every
+batch is derived from the wallet seed, so a page has neither the signature nor
+the blinding key; minting from the CSPRNG instead would reserve the account's
+epoch and lock the wallet's other clients (desktop app, extension, Rust SDK) out
+of it. A page that needs session tokens receives them from a component that holds
+the wallet (a backend on `@warrenbrowse/sdk-core`, or an extension background).
+
 ```ts
 import { WarrenWebClient } from '@warrenbrowse/sdk-web';
 

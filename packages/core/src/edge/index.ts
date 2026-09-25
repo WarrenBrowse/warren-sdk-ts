@@ -88,7 +88,9 @@ export {
 } from './token-blinding.js';
 export {
   InMemoryTokenPersistence,
+  type SessionTokenLease,
   TokenManager,
+  type TokenManagerOptions,
   type TokenPersistence,
 } from './token-manager.js';
 export {
@@ -106,6 +108,7 @@ export {
   TOKEN_TYPE_BLIND_RSA,
   type TokenClientState,
   tokenChallengeDigest,
+  tokenSerial,
 } from './token.js';
 export {
   FEATURE_MULTIPATH,

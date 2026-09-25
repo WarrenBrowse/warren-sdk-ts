@@ -6,8 +6,13 @@
  * property at stake: minting at connect time lets the account API correlate the
  * wallet-named issuance with the anonymous session. {@link TokenManager.refresh}
  * mints every published epoch AHEAD of need (call it on unlock and on a coarse
- * timer, NEVER at connect), and {@link TokenManager.takeCurrentStack} only pops a
- * pre-minted token at connect and never talks to the issuer.
+ * timer, NEVER at connect), and {@link TokenManager.sessionStack} /
+ * {@link TokenManager.takeCurrentStack} only read pre-minted tokens at connect
+ * and never talk to the issuer.
+ *
+ * Every batch is derived from the wallet (the `blindingKey`), so every client of
+ * a wallet holds the same tokens: a manager without a key reads and vends what
+ * a store holds but refuses to mint.
  *
  * The settle ledger mirrors the corrected core policy exactly: an epoch is
  * settled (never re-asked) only when it was minted into the store OR when the
@@ -17,6 +22,7 @@
  * silently downgrade a whole epoch to the wallet-signed fallback path.
  */
 
+import { bytesToHex } from '@noble/hashes/utils';
 import { base64urlnopad } from '@scure/base';
 import { WarrenEdgeError } from './errors.js';
 import {
@@ -25,7 +31,7 @@ import {
   currentEpoch,
   mintEpoch,
 } from './token-acquire.js';
-import { TOKEN_LEN } from './token.js';
+import { TOKEN_LEN, tokenSerial } from './token.js';
 
 /**
  * The issuer's once-per-account-epoch reject code. The only refusal that is
@@ -68,6 +74,28 @@ export class InMemoryTokenPersistence implements TokenPersistence {
   }
 }
 
+/**
+ * A live session's hold on the token it presents ({@link TokenManager.claim}).
+ * While held, the token's serial stays out of the manager's
+ * {@link TokenManager.sessionStack}; {@link release} gives it back. Releasing
+ * twice is harmless.
+ */
+export interface SessionTokenLease {
+  /** Gives the serial back to the manager's stack. */
+  release(): void;
+}
+
+/** Test and embedding options for a {@link TokenManager}. */
+export interface TokenManagerOptions {
+  /**
+   * Where {@link TokenManager.sessionStack} starts in the epoch's batch. Drawn
+   * at random per manager by default: every client of a wallet holds the same
+   * batch in the same order, so a fixed start would send all of them to the
+   * first serial.
+   */
+  rotation?: number;
+}
+
 interface PersistedBundle {
   v: number;
   /** Published epoch length in seconds; the current epoch is `now / epochSecs`. */
@@ -95,19 +123,31 @@ export class TokenManager {
   /** Epoch length carried across restarts by the persisted bundle, so
    * {@link takeCurrentStack} maps `now` to an epoch before the first refresh. */
   private epochSecs: number | undefined;
+  /** Hex serials the live sessions of this manager were admitted on. */
+  private readonly held = new Set<string>();
+  private readonly rotation: number;
+  private readonly blindingKey: Uint8Array | undefined;
 
   /**
-   * `blindingKey` ({@link blindingKeyFromSeed}) makes this account's batch a
-   * function of the wallet rather than of the CSPRNG. Without it, a store lost
-   * mid-epoch costs the user the rest of the epoch: the issuer signed that
-   * epoch once and refuses any other batch for it. With it, the client rebuilds
-   * the batch it already owns and the issuer serves it again, minting nothing.
+   * `blindingKey` ({@link blindingKeyFromSeed} with the class's purpose:
+   * `BLINDING_PURPOSE_SESSION` for {@link WarrenApiClient.tokenTransport},
+   * `BLINDING_PURPOSE_BROWSER_PROXY` for the browser-proxy lane) makes the
+   * account's batch a function of the wallet. The issuer signs one batch per
+   * account, class and epoch and serves it again only to a client sending it
+   * bit for bit, so every client of a wallet must derive the same one. It is
+   * copied, so the caller may wipe its own buffer.
+   *
+   * Without a key the manager only reads its store ({@link sessionStack},
+   * {@link takeCurrentStack}): {@link refresh} refuses to mint.
    */
   constructor(
     private readonly transport: TokenTransport,
     private readonly persistence: TokenPersistence = new InMemoryTokenPersistence(),
-    private readonly blindingKey?: Uint8Array,
+    blindingKey?: Uint8Array,
+    options?: TokenManagerOptions,
   ) {
+    this.blindingKey = blindingKey === undefined ? undefined : new Uint8Array(blindingKey);
+    this.rotation = options?.rotation ?? randomRotation();
     this.loadPersisted();
   }
 
@@ -121,11 +161,19 @@ export class TokenManager {
    * Drive this on unlock and on a coarse timer, NEVER at connect time, so
    * issuance timing does not mirror session timing.
    *
-   * @throws {WarrenEdgeError} `token_issuer` only when the directory fetch itself
-   * fails or carries an unusable epoch length; a per-epoch mint refusal or
-   * transport error is swallowed and left retryable.
+   * @throws {WarrenEdgeError} `no_blinding_key` when the manager holds no
+   * wallet blinding key (nothing is sent); `token_issuer` only when the
+   * directory fetch itself fails or carries an unusable epoch length; a
+   * per-epoch mint refusal or transport error is swallowed and left retryable.
    */
   async refresh(nowUnixSecs: number): Promise<void> {
+    const blindingKey = this.blindingKey;
+    if (blindingKey === undefined) {
+      throw new WarrenEdgeError(
+        'no_blinding_key',
+        'a token manager mints only from a wallet blinding key',
+      );
+    }
     const directory = await this.transport.getDirectory();
     const current = currentEpoch(directory, nowUnixSecs);
 
@@ -147,7 +195,7 @@ export class TokenManager {
           directory,
           epoch,
           directory.quota_per_epoch,
-          this.blindingKey,
+          blindingKey,
         );
         this.settled.add(epoch);
         const serialized = tokens.map((t) => t.serialize());
@@ -170,11 +218,60 @@ export class TokenManager {
   }
 
   /**
+   * Every token of the epoch `now` falls in, serialized, for ONE session to
+   * walk in this order: starting at this manager's rotation and leaving out the
+   * serials its live sessions hold ({@link claim}). Nothing is consumed and
+   * nothing is minted (the Rust `TokenManager::session_stack`).
+   *
+   * Every client of the wallet holds the same tokens, and an exit refuses a
+   * serial another session holds anywhere in the fleet with the same rejection
+   * it gives an invalid token. So a session claims the lead, presents it, and on
+   * a refusal moves to the next token. An empty stack means no token is free
+   * this epoch.
+   */
+  sessionStack(nowUnixSecs: number): Uint8Array[] {
+    const epoch = this.epochAt(nowUnixSecs);
+    if (epoch === undefined) return [];
+    const tokens = this.store.get(epoch) ?? [];
+    if (tokens.length === 0) return [];
+    const start = this.rotation % tokens.length;
+    return [...tokens.slice(start), ...tokens.slice(0, start)]
+      .filter((token) => {
+        const serial = tokenSerial(token);
+        return serial !== undefined && !this.held.has(bytesToHex(serial));
+      })
+      .map((token) => new Uint8Array(token));
+  }
+
+  /**
+   * Holds `token`'s serial for a session about to present it, so no other
+   * session of this manager leads with it until the lease is released.
+   * `undefined` when a live session already holds it, or when the bytes are no
+   * token.
+   */
+  claim(token: Uint8Array): SessionTokenLease | undefined {
+    const serial = tokenSerial(token);
+    if (serial === undefined) return undefined;
+    const key = bytesToHex(serial);
+    if (this.held.has(key)) return undefined;
+    this.held.add(key);
+    let live = true;
+    return {
+      release: () => {
+        if (!live) return;
+        live = false;
+        this.held.delete(key);
+      },
+    };
+  }
+
+  /**
    * Pops ONE pre-minted token for the epoch `now` falls in and returns it
-   * serialized (a single-element stack the tunnel presents on every bonded
-   * connection so they share one anonymous serial). Returns an empty array when
-   * no token is available for this epoch; the caller then falls back to the
-   * wallet-signed path. NEVER mints (no issuer call at connect).
+   * serialized, removing it from the store. For a credential spent once per
+   * epoch (the browser-proxy class); a tunnel session walks
+   * {@link sessionStack} instead, since every client of the wallet holds the
+   * same session tokens. Returns an empty array when no token is available for
+   * this epoch. NEVER mints (no issuer call at connect).
    */
   takeCurrentStack(nowUnixSecs: number): Uint8Array[] {
     const epoch = this.epochAt(nowUnixSecs);
@@ -266,4 +363,11 @@ export class TokenManager {
       if (tokens.length > 0) this.store.set(epoch, tokens);
     }
   }
+}
+
+/** A uniformly drawn start for {@link TokenManager.sessionStack}. */
+function randomRotation(): number {
+  const out = new Uint32Array(1);
+  globalThis.crypto.getRandomValues(out);
+  return out[0] ?? 0;
 }
