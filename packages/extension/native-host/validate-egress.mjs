@@ -2,9 +2,12 @@
 // messaging framing, launched exactly as Chromium launches it (the caller
 // origin as its argument). Always: hello naming the beta channel, then the
 // verified exit list. With WARREN_MNEMONIC set, also: account lookup, connect
-// (a real multi-hop tunnel), an authenticated SOCKS5 CONNECT through the
-// listener the helper opened, and disconnect. The mnemonic travels only inside
-// the connect and account frames, as the extension vault sends it.
+// (a real multi-hop tunnel) naming its exit, status naming the same exit, an
+// authenticated SOCKS5 CONNECT through the listener the helper opened,
+// disconnect, a status that no longer names an exit, then a connect through an
+// entry in another country, whose answer must still name the exit. The
+// mnemonic travels only inside the connect and account frames, as the
+// extension vault sends it. Only the exit's country is printed.
 //
 //   node validate-egress.mjs <path to warren-host>
 //   WARREN_MNEMONIC="<subscribed 12 words>" node validate-egress.mjs <path to warren-host>
@@ -120,6 +123,18 @@ function call(request, timeoutMs = 60000) {
   });
 }
 
+/** Whether `exit` is what the protocol promises: an upper-case alpha-2
+ * country and a city. */
+function wellFormedExit(exit) {
+  return (
+    typeof exit === 'object' &&
+    exit !== null &&
+    typeof exit.country === 'string' &&
+    /^[A-Z]{2}$/.test(exit.country) &&
+    typeof exit.city === 'string'
+  );
+}
+
 function fail(message) {
   console.error('FAIL:', message);
   host.kill('SIGTERM');
@@ -159,12 +174,14 @@ try {
     fail(
       `connect: ${connect.ok ? 'no endpoints or credentials' : `${connect.code}: ${connect.message}`}`,
     );
+  if (!wellFormedExit(connect.exit)) fail(`connect named no exit: ${JSON.stringify(connect.exit)}`);
   const status = await call({ type: 'status' });
   if (JSON.stringify(status).includes(connect.auth.password))
     fail('status carried the listener credentials');
-  console.log(
-    `connect ok      : SOCKS5 ${connect.endpoints.socks5} | states: ${events.join(' -> ')}`,
-  );
+  if (JSON.stringify(status.exit) !== JSON.stringify(connect.exit))
+    fail(`status named another exit than connect: ${status.exit?.country}`);
+  console.log(`connect ok      : SOCKS5 listener up | states: ${events.join(' -> ')}`);
+  console.log(`exit ok         : connect and status name the exit country ${connect.exit.country}`);
 
   const [sh, sp] = connect.endpoints.socks5.split(':');
   let egress = '';
@@ -190,6 +207,41 @@ try {
   const disconnect = await call({ type: 'disconnect' });
   if (!disconnect.ok) fail(`disconnect: ${JSON.stringify(disconnect)}`);
   console.log(`disconnect ok   : states: ${events.join(' -> ')}`);
+  const after = await call({ type: 'status' });
+  if (!after.ok || after.state !== 'disconnected' || 'exit' in after)
+    fail(`status after disconnect: state ${after.state}, exit ${after.exit?.country}`);
+  console.log('status ok       : no exit named once the tunnel is gone');
+
+  // Through an entry elsewhere, the answer must still name the exit, never
+  // the entry. Candidates are tried in turn, as a circuit policy may refuse one.
+  const exitCountry = connect.exit.country;
+  const entries = [...new Set(active.map((l) => l.country.toUpperCase()))].filter(
+    (c) => c !== exitCountry,
+  );
+  let entryChecked = false;
+  for (const entryCountry of entries) {
+    const via = await call({
+      type: 'connect',
+      mnemonic,
+      selector: { country: exitCountry },
+      entrySelector: { country: entryCountry },
+    });
+    if (!via.ok) {
+      if (via.code === 'discovery') continue;
+      fail(`connect via an entry in ${entryCountry}: ${via.code}: ${via.message}`);
+    }
+    const named = via.exit?.country;
+    const done = await call({ type: 'disconnect' });
+    if (!done.ok) fail(`disconnect: ${JSON.stringify(done)}`);
+    if (named !== exitCountry)
+      fail(`through an entry in ${entryCountry} the answer named ${named}, not ${exitCountry}`);
+    console.log(
+      `entry ok        : via an entry in ${entryCountry}, the answer still names the exit ${named}`,
+    );
+    entryChecked = true;
+    break;
+  }
+  if (!entryChecked) fail('no entry in another country composed a circuit to the exit');
   host.stdin.end();
   console.log('\nVERDICT: PASS (helper protocol + real multi-hop egress through the helper)');
   process.exit(0);

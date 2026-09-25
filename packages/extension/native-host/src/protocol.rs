@@ -243,6 +243,22 @@ impl Endpoints {
     }
 }
 
+/// The exit a tunnel lands on, as the relay list names it. With an entry
+/// selector this is still the exit, never the entry the circuit enters by.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelExit {
+    /// ISO 3166-1 alpha-2 country code, upper-case.
+    pub country: String,
+    /// City name.
+    pub city: String,
+}
+
+impl TunnelExit {
+    fn to_json(&self) -> Value {
+        json!({ "country": self.country, "city": self.city })
+    }
+}
+
 /// One selectable exit location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExitLocation {
@@ -260,26 +276,47 @@ pub fn hello_answer(id: &Value) -> Value {
     json!({ "id": id, "ok": true, "type": "hello", "protocol": PROTOCOL_VERSION, "datapath": "ready" })
 }
 
-/// The `status` answer.
+/// The `status` answer. `exit` is named while a tunnel is up and its exit is
+/// known.
 #[must_use]
-pub fn status_answer(id: &Value, state: HostState, endpoints: Option<&Endpoints>) -> Value {
+pub fn status_answer(
+    id: &Value,
+    state: HostState,
+    endpoints: Option<&Endpoints>,
+    exit: Option<&TunnelExit>,
+) -> Value {
     let mut value = json!({ "id": id, "ok": true, "type": "status", "state": state.as_str() });
     if let Some(endpoints) = endpoints {
         value["endpoints"] = endpoints.to_json();
     }
+    if let Some(exit) = exit {
+        value["exit"] = exit.to_json();
+    }
     value
 }
 
-/// The `connect` answer: the one place the listener credentials cross.
+/// The `connect` answer: the one place the listener credentials cross. An
+/// extension that predates `exit` ignores it; a newer one reads its absence as
+/// an unknown exit.
 #[must_use]
-pub fn connect_answer(id: &Value, endpoints: &Endpoints, username: &str, password: &str) -> Value {
-    json!({
+pub fn connect_answer(
+    id: &Value,
+    endpoints: &Endpoints,
+    username: &str,
+    password: &str,
+    exit: Option<&TunnelExit>,
+) -> Value {
+    let mut value = json!({
         "id": id,
         "ok": true,
         "type": "connect",
         "endpoints": endpoints.to_json(),
         "auth": { "username": username, "password": password },
-    })
+    });
+    if let Some(exit) = exit {
+        value["exit"] = exit.to_json();
+    }
+    value
 }
 
 /// The `disconnect` answer.
@@ -419,12 +456,12 @@ mod tests {
             json!({ "id": 1, "ok": true, "type": "hello", "protocol": 3, "datapath": "ready" })
         );
         assert_eq!(
-            status_answer(&json!(2), HostState::Connected, Some(&endpoints)),
+            status_answer(&json!(2), HostState::Connected, Some(&endpoints), None),
             json!({ "id": 2, "ok": true, "type": "status", "state": "connected",
                     "endpoints": { "socks5": "127.0.0.1:1080", "http": "127.0.0.1:8118" } })
         );
         assert_eq!(
-            status_answer(&json!(3), HostState::Disconnected, None),
+            status_answer(&json!(3), HostState::Disconnected, None, None),
             json!({ "id": 3, "ok": true, "type": "status", "state": "disconnected" })
         );
         assert_eq!(
@@ -434,6 +471,42 @@ mod tests {
         assert_eq!(
             state_event(HostState::Reconnecting),
             json!({ "type": "state", "state": "reconnecting" })
+        );
+    }
+
+    #[test]
+    fn connect_and_status_answers_name_the_exit_only_when_it_is_known() {
+        let endpoints = Endpoints {
+            socks5: "127.0.0.1:1080".into(),
+            http: None,
+        };
+        let exit = TunnelExit {
+            country: "RO".into(),
+            city: "Bucharest".into(),
+        };
+        assert_eq!(
+            connect_answer(&json!(5), &endpoints, "warren", "secret", Some(&exit)),
+            json!({ "id": 5, "ok": true, "type": "connect",
+                    "endpoints": { "socks5": "127.0.0.1:1080" },
+                    "auth": { "username": "warren", "password": "secret" },
+                    "exit": { "country": "RO", "city": "Bucharest" } })
+        );
+        assert_eq!(
+            connect_answer(&json!(5), &endpoints, "warren", "secret", None),
+            json!({ "id": 5, "ok": true, "type": "connect",
+                    "endpoints": { "socks5": "127.0.0.1:1080" },
+                    "auth": { "username": "warren", "password": "secret" } })
+        );
+        assert_eq!(
+            status_answer(
+                &json!(6),
+                HostState::Connected,
+                Some(&endpoints),
+                Some(&exit)
+            ),
+            json!({ "id": 6, "ok": true, "type": "status", "state": "connected",
+                    "endpoints": { "socks5": "127.0.0.1:1080" },
+                    "exit": { "country": "RO", "city": "Bucharest" } })
         );
     }
 

@@ -4,10 +4,12 @@ import {
   type ExtensionEndpoints,
   type ExtensionExitLocation,
   type ExtensionProxyAuth,
+  type ExtensionTunnelExit,
   type ExtensionVpnState,
   type HostDatapath,
   type HostMessage,
   type HostRequest,
+  parseTunnelExit,
 } from '../protocol.js';
 
 /** The tunnel surface the session drives (ProxyTunnel-shaped; fakeable in tests). */
@@ -16,7 +18,7 @@ export interface HostTunnel {
     selector?: { exitPubkeyHex?: string; country?: string; city?: string };
     entrySelector?: { country?: string; city?: string };
     httpProxy?: boolean;
-  }): Promise<ExtensionEndpoints & ExtensionProxyAuth>;
+  }): Promise<ExtensionEndpoints & ExtensionProxyAuth & { exit?: ExtensionTunnelExit }>;
   shutdown(): Promise<void>;
 }
 
@@ -65,6 +67,8 @@ export class HostSession {
   private readonly options: HostSessionOptions;
   private tunnel: HostTunnel | undefined;
   private endpoints: ExtensionEndpoints | undefined;
+  /** The live tunnel's exit, when its tunnel reported one; gone with it. */
+  private exit: ExtensionTunnelExit | undefined;
   private state: ExtensionVpnState = 'disconnected';
   private connecting = false;
   /** The extension's channel, from its hello. */
@@ -104,6 +108,7 @@ export class HostSession {
           type: 'status',
           state: this.state,
           ...(this.endpoints ? { endpoints: this.endpoints } : {}),
+          ...(this.exit ? { exit: this.exit } : {}),
         });
         return;
       case 'connect':
@@ -166,11 +171,12 @@ export class HostSession {
           ...(this.channel ? { channel: this.channel } : {}),
         },
       );
-      const { socks5, http, username, password } = await tunnel.connect({
+      const reported = await tunnel.connect({
         ...(request.selector ? { selector: request.selector } : {}),
         ...(request.entrySelector ? { entrySelector: request.entrySelector } : {}),
         ...(request.httpProxy !== undefined ? { httpProxy: request.httpProxy } : {}),
       });
+      const { socks5, http, username, password } = reported;
       if (!isCredential(username) || !isCredential(password)) {
         throw Object.assign(new Error('the tunnel reported no listener credentials'), {
           code: 'protocol',
@@ -181,6 +187,8 @@ export class HostSession {
       // Only the addresses stay here, for status: the credentials cross the
       // channel once, in this answer.
       this.endpoints = endpoints;
+      const exit = parseTunnelExit(reported.exit);
+      this.exit = exit;
       this.state = 'connected';
       this.options.send({
         id: request.id,
@@ -188,6 +196,7 @@ export class HostSession {
         type: 'connect',
         endpoints,
         auth: { username, password },
+        ...(exit ? { exit } : {}),
       });
     } catch (error) {
       // Fail-closed: never leave a half-built tunnel running after an error.
@@ -203,6 +212,7 @@ export class HostSession {
     const tunnel = this.tunnel;
     this.tunnel = undefined;
     this.endpoints = undefined;
+    this.exit = undefined;
     this.state = 'disconnected';
     if (tunnel) await tunnel.shutdown().catch(() => undefined);
   }

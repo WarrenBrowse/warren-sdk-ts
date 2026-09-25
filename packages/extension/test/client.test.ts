@@ -814,6 +814,78 @@ describe('WarrenBrowserVpn events and state', () => {
   });
 });
 
+describe('WarrenBrowserVpn exit location', () => {
+  const BUCHAREST = { country: 'RO', city: 'Bucharest' };
+
+  function hostLandingOn(exit: unknown) {
+    return (req: HostRequest, p: FakePort): void => {
+      if (req.type === 'connect') {
+        p.emit({ id: req.id, ok: true, type: 'connect', endpoints: LISTENERS, auth: AUTH, exit });
+      } else if (req.type === 'status') {
+        p.emit({ id: req.id, ok: true, type: 'status', state: 'connected', exit });
+      } else healthyHost(req, p);
+    };
+  }
+
+  it('knows no exit before a connect', () => {
+    const { chrome } = fakeChrome(hostLandingOn(BUCHAREST));
+    expect(new WarrenBrowserVpn({ chrome }).exitLocation()).toBeUndefined();
+  });
+
+  it('keeps the exit the host names at connect, and forgets it on disconnect', async () => {
+    const { chrome } = fakeChrome(hostLandingOn(BUCHAREST));
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+
+    expect(vpn.exitLocation()).toEqual(BUCHAREST);
+
+    await vpn.disconnect();
+    expect(vpn.exitLocation()).toBeUndefined();
+  });
+
+  it('forgets the exit when the host that carried the tunnel dies', async () => {
+    const { chrome, port } = fakeChrome(hostLandingOn(BUCHAREST));
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+
+    port.die();
+
+    expect(vpn.exitLocation()).toBeUndefined();
+  });
+
+  it('reads a missing or malformed exit as unknown, and still connects', async () => {
+    for (const exit of [undefined, { country: 42, city: 'x' }, { country: 'ROU', city: 'x' }]) {
+      const { chrome } = fakeChrome(hostLandingOn(exit));
+      const vpn = new WarrenBrowserVpn({ chrome });
+      await vpn.connect({ mnemonic: 'm' });
+      expect(vpn.exitLocation()).toBeUndefined();
+    }
+  });
+
+  it('reads the country upper-case, as ISO 3166-1 alpha-2 spells it', async () => {
+    const { chrome } = fakeChrome(hostLandingOn({ country: 'ro', city: 'Bucharest' }));
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+    expect(vpn.exitLocation()).toEqual(BUCHAREST);
+  });
+
+  it('hands out a copy the caller cannot use to rewrite the exit', async () => {
+    const { chrome } = fakeChrome(hostLandingOn(BUCHAREST));
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+    const seen = vpn.exitLocation();
+    if (seen) seen.country = 'NL';
+    expect(vpn.exitLocation()).toEqual(BUCHAREST);
+  });
+
+  it('relays the exit a status answer names', async () => {
+    const { chrome } = fakeChrome(hostLandingOn(BUCHAREST));
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+    expect(await vpn.status()).toMatchObject({ state: 'connected', exit: BUCHAREST });
+  });
+});
+
 describe('WarrenBrowserVpn discovery and account', () => {
   it('lists exit locations from the host', async () => {
     const locations = [

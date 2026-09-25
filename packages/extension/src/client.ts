@@ -8,11 +8,13 @@ import {
   type ExtensionExitLocation,
   type ExtensionExitQuery,
   type ExtensionProxyAuth,
+  type ExtensionTunnelExit,
   type ExtensionVpnState,
   type HostDatapath,
   type HostRequest,
   type HostResponse,
   parseHostMessage,
+  parseTunnelExit,
 } from './protocol.js';
 import {
   DEFAULT_SPLIT,
@@ -232,6 +234,8 @@ export class WarrenBrowserVpn {
   private endpoints: ExtensionEndpoints | undefined;
   /** The credentials of the live host's listeners; dropped with the host. */
   private auth: ExtensionProxyAuth | undefined;
+  /** Where the live tunnel exits, when its host said; dropped with the host. */
+  private exit: ExtensionTunnelExit | undefined;
   private connecting = false;
   /** Questions in flight, which the port must outlive. */
   private questions = 0;
@@ -287,6 +291,14 @@ export class WarrenBrowserVpn {
     return listener === endpoints.http || listener === endpoints.socks5
       ? { ...this.auth }
       : undefined;
+  }
+
+  /**
+   * The country and city of the exit the live tunnel lands on, or `undefined`
+   * with no live tunnel or from a host that does not name its exit.
+   */
+  exitLocation(): ExtensionTunnelExit | undefined {
+    return this.exit ? { ...this.exit } : undefined;
   }
 
   /**
@@ -381,6 +393,7 @@ export class WarrenBrowserVpn {
       this.assertHostAlive();
       this.proxied = true;
       this.tunnelUp = true;
+      this.exit = parseTunnelExit(res.exit);
       if (heldHandler) this.chrome.proxy.onRequest?.removeListener(heldHandler);
       return res.endpoints;
     } catch (error) {
@@ -486,12 +499,21 @@ export class WarrenBrowserVpn {
   }
 
   /** Asks the host for the current tunnel state. */
-  async status(): Promise<{ state: ExtensionVpnState; endpoints?: ExtensionEndpoints }> {
+  async status(): Promise<{
+    state: ExtensionVpnState;
+    endpoints?: ExtensionEndpoints;
+    exit?: ExtensionTunnelExit;
+  }> {
     const res = await this.asking(() => this.request({ type: 'status' }));
     if (res.type !== 'status') {
       throw new WarrenExtensionError('protocol', 'unexpected host response to status');
     }
-    return { state: res.state, ...(res.endpoints ? { endpoints: res.endpoints } : {}) };
+    const exit = parseTunnelExit(res.exit);
+    return {
+      state: res.state,
+      ...(res.endpoints ? { endpoints: res.endpoints } : {}),
+      ...(exit ? { exit } : {}),
+    };
   }
 
   /**
@@ -552,6 +574,7 @@ export class WarrenBrowserVpn {
       this.tunnelUp = false;
       this.endpoints = undefined;
       this.auth = undefined;
+      this.exit = undefined;
       this.closePort();
       this.releasing = false;
     }
@@ -627,6 +650,7 @@ export class WarrenBrowserVpn {
       this.tunnelUp = false;
       // The host took its listeners with it: nothing may answer for them now.
       this.auth = undefined;
+      this.exit = undefined;
       const wasProxied = this.proxied;
       for (const [, waiter] of this.pending) {
         waiter.reject(

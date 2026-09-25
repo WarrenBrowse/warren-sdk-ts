@@ -159,6 +159,7 @@ mod tests {
                 },
                 username: "warren".into(),
                 password: Zeroizing::new("secret".into()),
+                exit: None,
             })
         }
 

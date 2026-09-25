@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::protocol::{
     self, ConnectRequest, Endpoints, EntryQuery, Envelope, ExitLocation, ExitQuery, HostState,
-    PROTOCOL_VERSION, Request,
+    PROTOCOL_VERSION, Request, TunnelExit,
 };
 
 /// The stable codes an error answer carries, spelled as the Node host spells
@@ -125,6 +125,8 @@ pub struct Listeners {
     pub username: String,
     /// Per-session password clients present.
     pub password: Zeroizing<String>,
+    /// The exit the tunnel lands on, when the tunnel knows it.
+    pub exit: Option<TunnelExit>,
 }
 
 /// One tunnel, as the session drives it.
@@ -167,6 +169,8 @@ pub trait HostBackend {
 struct Inner<T> {
     state: HostState,
     endpoints: Option<Endpoints>,
+    /// The live tunnel's exit, for status; gone with the tunnel.
+    exit: Option<TunnelExit>,
     tunnel: Option<T>,
     connecting: bool,
     /// Set once the browser is gone: no tunnel may come up after that.
@@ -198,6 +202,7 @@ impl<B: HostBackend> HostSession<B> {
             inner: Arc::new(Mutex::new(Inner {
                 state: HostState::Disconnected,
                 endpoints: None,
+                exit: None,
                 tunnel: None,
                 connecting: false,
                 closed: false,
@@ -214,7 +219,12 @@ impl<B: HostBackend> HostSession<B> {
             Request::Hello { protocol, channel } => self.hello(&id, protocol, channel),
             Request::Status => {
                 let inner = lock(&self.inner);
-                let answer = protocol::status_answer(&id, inner.state, inner.endpoints.as_ref());
+                let answer = protocol::status_answer(
+                    &id,
+                    inner.state,
+                    inner.endpoints.as_ref(),
+                    inner.exit.as_ref(),
+                );
                 drop(inner);
                 self.send(answer);
             }
@@ -328,12 +338,14 @@ impl<B: HostBackend> HostSession<B> {
                     // Only the addresses stay, for status: the credentials
                     // cross the channel once, in this answer.
                     inner.endpoints = Some(listeners.endpoints.clone());
+                    inner.exit.clone_from(&listeners.exit);
                     inner.state = HostState::Connected;
                     let answer = protocol::connect_answer(
                         id,
                         &listeners.endpoints,
                         &listeners.username,
                         &listeners.password,
+                        listeners.exit.as_ref(),
                     );
                     (None, answer)
                 }
@@ -389,6 +401,7 @@ impl<B: HostBackend> HostSession<B> {
             let mut inner = lock(&self.inner);
             inner.generation += 1;
             inner.endpoints = None;
+            inner.exit = None;
             inner.state = HostState::Disconnected;
             inner.tunnel.take()
         };
@@ -437,6 +450,8 @@ mod tests {
         connect_error: Option<HostError>,
         username: Option<String>,
         password: Option<String>,
+        /// The exit the fake tunnel reports landing on.
+        exit: Option<TunnelExit>,
         /// When set, connect waits for this before answering.
         gate: Option<Arc<Notify>>,
         exits: Option<Result<Vec<ExitLocation>, HostError>>,
@@ -471,6 +486,7 @@ mod tests {
                         .clone()
                         .unwrap_or_else(|| "session-secret".into()),
                 ),
+                exit: self.fake.exit.clone(),
             })
         }
 
@@ -657,6 +673,51 @@ mod tests {
                         "auth": { "username": "warren", "password": "session-secret" } }),
             ]
         );
+    }
+
+    fn bucharest() -> TunnelExit {
+        TunnelExit {
+            country: "RO".into(),
+            city: "Bucharest".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn names_the_exit_in_the_connect_answer_and_in_status_until_teardown() {
+        let h = Harness::new(Fake {
+            exit: Some(bucharest()),
+            ..Fake::default()
+        });
+        h.send(connect(1)).await;
+        assert_eq!(
+            h.last()["exit"],
+            json!({ "country": "RO", "city": "Bucharest" })
+        );
+        h.send(json!({ "id": 2, "type": "status" })).await;
+        assert_eq!(
+            h.last(),
+            json!({ "id": 2, "ok": true, "type": "status", "state": "connected",
+                    "endpoints": { "socks5": "127.0.0.1:1080", "http": "127.0.0.1:8118" },
+                    "exit": { "country": "RO", "city": "Bucharest" } })
+        );
+        h.send(json!({ "id": 3, "type": "disconnect" })).await;
+        h.send(json!({ "id": 4, "type": "status" })).await;
+        assert_eq!(
+            h.last(),
+            json!({ "id": 4, "ok": true, "type": "status", "state": "disconnected" })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_closed_session_no_longer_names_the_exit() {
+        let h = Harness::new(Fake {
+            exit: Some(bucharest()),
+            ..Fake::default()
+        });
+        h.send(connect(1)).await;
+        h.session.close().await;
+        h.send(json!({ "id": 2, "type": "status" })).await;
+        assert!(h.last().get("exit").is_none(), "{}", h.last());
     }
 
     #[tokio::test]

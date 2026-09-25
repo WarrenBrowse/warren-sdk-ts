@@ -4,6 +4,7 @@ import { callerAllowed, configFromEnv, hostApiBase } from '../src/host/run.js';
 import { HostSession, type HostTunnel, type HostTunnelFactory } from '../src/host/session.js';
 import {
   EXTENSION_PROTOCOL_VERSION,
+  type ExtensionTunnelExit,
   type HostDatapath,
   type HostMessage,
 } from '../src/protocol.js';
@@ -19,17 +20,24 @@ class FakeTunnel implements HostTunnel {
   constructor(
     private readonly failWith?: string,
     private readonly auth: Partial<typeof AUTH> = AUTH,
+    private readonly exit?: ExtensionTunnelExit,
   ) {}
 
-  async connect(
-    options?: unknown,
-  ): Promise<{ socks5: string; http?: string; username: string; password: string }> {
+  async connect(options?: unknown): Promise<
+    { socks5: string; http?: string; username: string; password: string } & {
+      exit?: ExtensionTunnelExit;
+    }
+  > {
     this.seenConnect = options;
     if (this.failWith) {
       throw Object.assign(new Error(this.failWith), { code: 'api' });
     }
     this.onStateCb?.('connected');
-    return { ...LISTENERS, ...this.auth } as typeof LISTENERS & typeof AUTH;
+    return {
+      ...LISTENERS,
+      ...this.auth,
+      ...(this.exit ? { exit: this.exit } : {}),
+    } as typeof LISTENERS & typeof AUTH;
   }
   async shutdown(): Promise<void> {
     this.shutdownCalls += 1;
@@ -195,6 +203,37 @@ describe('HostSession', () => {
     expect(tunnel.shutdownCalls).toBe(1);
     await session.handle({ id: 5, type: 'status' });
     expect(sent.at(-1)).toMatchObject({ id: 5, ok: true, state: 'disconnected' });
+  });
+
+  it('names the exit its tunnel lands on in the connect answer and in status, until teardown', async () => {
+    const exit = { country: 'RO', city: 'Bucharest' };
+    const { session, sent } = makeSession(new FakeTunnel(undefined, AUTH, exit));
+    await session.handle({ id: 1, type: 'connect', mnemonic: M });
+    expect(sent.at(-1)).toEqual({
+      id: 1,
+      ok: true,
+      type: 'connect',
+      endpoints: LISTENERS,
+      auth: AUTH,
+      exit,
+    });
+
+    await session.handle({ id: 2, type: 'status' });
+    expect(sent.at(-1)).toMatchObject({ id: 2, state: 'connected', exit });
+
+    await session.handle({ id: 3, type: 'disconnect' });
+    await session.handle({ id: 4, type: 'status' });
+    expect(sent.at(-1)).not.toHaveProperty('exit');
+  });
+
+  it('names no exit when its tunnel reports none or a malformed one', async () => {
+    const malformed = { country: 42, city: 'Bucharest' } as unknown as ExtensionTunnelExit;
+    for (const tunnel of [new FakeTunnel(), new FakeTunnel(undefined, AUTH, malformed)]) {
+      const { session, sent } = makeSession(tunnel);
+      await session.handle({ id: 1, type: 'connect', mnemonic: M });
+      expect(sent.at(-1)).toMatchObject({ id: 1, ok: true });
+      expect(sent.at(-1)).not.toHaveProperty('exit');
+    }
   });
 
   it('answers an unknown or malformed request with a protocol error, without crashing', async () => {

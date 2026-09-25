@@ -246,8 +246,10 @@ node validate-egress.mjs target/release/warren-host   # WARREN_MNEMONIC=... adds
 in-memory pipes, the built binary over real framing, and `install` /
 `uninstall` into a temporary home directory. `validate-egress.mjs` launches the
 binary as Chromium does and runs `hello` and `exits`, then, with
-`WARREN_MNEMONIC` set, `account`, `connect`, an authenticated SOCKS5 CONNECT
-through the tunnel and `disconnect`.
+`WARREN_MNEMONIC` set, `account`, `connect` and `status` (both must name the
+same exit), an authenticated SOCKS5 CONNECT through the tunnel, `disconnect`,
+and a connect through an entry in another country whose answer must still name
+the exit's country.
 
 ### Releases
 
@@ -284,10 +286,11 @@ persists its anti-rollback floors.
 Version-3 JSON messages over native messaging (Chrome frames them; the host
 speaks the 4-byte little-endian stdio framing): `hello {protocol, channel?}`
 (version handshake naming the extension's channel, no identity; the answer
-carries `datapath`), `status`, `connect {mnemonic, selector?, entrySelector?,
-daita?, httpProxy?}` (`entrySelector` picks the multihop entry country, always a
-node distinct from the exit; the answer carries the listener credentials),
-`disconnect`, `exits` (the verified relay-list locations, for a location
+carries `datapath`), `status` (the state, and while a tunnel is up its
+`endpoints` and `exit`), `connect {mnemonic, selector?, entrySelector?, daita?,
+httpProxy?}` (`entrySelector` picks the multihop entry country, always a node
+distinct from the exit; the answer carries the listener credentials and
+`exit`), `disconnect`, `exits` (the verified relay-list locations, for a location
 picker), `account {mnemonic}` (signed subscription lookup, returns
 `expiresAt`), plus unsolicited `{type: 'state'}` events. The mnemonic crosses
 only this local IPC, never a page or the network. Typed errors:
@@ -295,6 +298,14 @@ only this local IPC, never a page or the network. Typed errors:
 already_connected | not_connected | proxy_uncontrollable |
 private_browsing_required` (host-reported failures keep their own code in
 `hostCode`).
+
+`exit` is `{country, city}`: the ISO 3166-1 alpha-2 country (upper-case) and the
+city of the exit the tunnel lands on, as the verified relay list names them.
+With an entry selector it is still the exit, never the entry. The field is
+additive within version 3: an older extension ignores it, and
+`WarrenBrowserVpn.exitLocation()` returns `undefined` when a host does not name
+it (the Node host's napi tunnel does not report its exit today), with no live
+tunnel, and once the host is gone. `status()` relays it as well.
 
 ## EdgeConnect (browser WebTransport tier)
 

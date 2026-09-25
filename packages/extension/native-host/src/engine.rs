@@ -18,7 +18,7 @@ use warren_sdk::{
 };
 use zeroize::Zeroizing;
 
-use crate::protocol::{Endpoints, EntryQuery, ExitLocation, ExitQuery, HostState};
+use crate::protocol::{Endpoints, EntryQuery, ExitLocation, ExitQuery, HostState, TunnelExit};
 use crate::session::{
     ConnectOptions, ErrorCode, HostBackend, HostError, HostTunnel, Listeners, StateSink, TunnelInit,
 };
@@ -113,6 +113,16 @@ pub fn exit_matches(exit: &VerifiedExit, query: &ExitQuery) -> bool {
             .city
             .as_deref()
             .is_none_or(|c| exit.city.eq_ignore_ascii_case(c))
+}
+
+/// Names `exit` as the extension shows it: the relay list's country code
+/// upper-cased, and its city.
+#[must_use]
+pub fn tunnel_exit(exit: &VerifiedExit) -> TunnelExit {
+    TunnelExit {
+        country: exit.country.to_ascii_uppercase(),
+        city: exit.city.clone(),
+    }
 }
 
 /// Composes an entry-selected circuit exactly as the napi binding does: a
@@ -331,6 +341,9 @@ impl HostTunnel for EngineTunnel {
                     "no cross-checked exit matched the selector",
                 )
             })?;
+        // Named before an entry selector recomposes the circuit: what the
+        // extension shows is where traffic leaves, never the hop it enters by.
+        let landing = tunnel_exit(&exit);
         if let Some(entry_query) = options.entry_selector {
             let (entries, policy) = self.cross_checked_entries().await?;
             let advisory = self.client.fetch_path_quality().await;
@@ -370,6 +383,7 @@ impl HostTunnel for EngineTunnel {
             },
             username: handle.credentials().username().to_owned(),
             password: Zeroizing::new(handle.credentials().password().to_owned()),
+            exit: Some(landing),
         };
         let mut states = handle.watch_state();
         let on_state = Arc::clone(&self.on_state);
@@ -486,6 +500,18 @@ mod tests {
             ..ExitQuery::default()
         };
         assert!(!exit_matches(&de, &wrong_city));
+    }
+
+    #[test]
+    fn names_the_exit_by_its_upper_case_country_and_its_city() {
+        let ro = exit(1, "ro", "Bucharest", 0);
+        assert_eq!(
+            tunnel_exit(&ro),
+            TunnelExit {
+                country: "RO".into(),
+                city: "Bucharest".into(),
+            }
+        );
     }
 
     #[test]

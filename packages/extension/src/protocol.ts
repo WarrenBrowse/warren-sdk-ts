@@ -15,6 +15,12 @@
  * The hello answer may also carry `datapath`, the state of the host's native
  * addon, which is built apart from the host's scripts and can lag them. A peer
  * that omits it is read as not saying, so the field needs no version bump.
+ *
+ * The connect answer, and the status answer while a tunnel is up, may carry
+ * `exit`: the country and city of the exit the tunnel lands on (with an entry
+ * selector, still the exit, never the entry). Additive in the same way: an
+ * older extension ignores it, and a newer one reads its absence, or a value
+ * of the wrong shape, as an unknown exit.
  */
 import type { ProductChannel } from '@warrenbrowse/sdk-core';
 
@@ -62,6 +68,25 @@ export interface ExtensionExitLocation {
   country: string;
   city: string;
   active: boolean;
+}
+
+/** The exit a live tunnel lands on, as the verified relay list names it. */
+export interface ExtensionTunnelExit {
+  /** ISO 3166-1 alpha-2 country code, upper-case. */
+  country: string;
+  city: string;
+}
+
+/**
+ * Reads an `exit` field from the host, or `undefined` when it is absent or not
+ * a two-letter country with a city. The country comes back upper-case.
+ */
+export function parseTunnelExit(value: unknown): ExtensionTunnelExit | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const { country, city } = value as Record<string, unknown>;
+  if (typeof country !== 'string' || !/^[A-Za-z]{2}$/.test(country)) return undefined;
+  if (typeof city !== 'string') return undefined;
+  return { country: country.toUpperCase(), city };
 }
 
 /** Requests the extension sends to the host. */
@@ -134,6 +159,8 @@ export type HostResponse =
       type: 'status';
       state: ExtensionVpnState;
       endpoints?: ExtensionEndpoints;
+      /** The live tunnel's exit; absent with no tunnel or an unknown exit. */
+      exit?: ExtensionTunnelExit;
     }
   | {
       id: number;
@@ -141,6 +168,8 @@ export type HostResponse =
       type: 'connect';
       endpoints: ExtensionEndpoints;
       auth: ExtensionProxyAuth;
+      /** The exit the tunnel lands on; absent from a host that does not know it. */
+      exit?: ExtensionTunnelExit;
     }
   | { id: number; ok: true; type: 'disconnect' }
   | { id: number; ok: true; type: 'exits'; locations: ExtensionExitLocation[] }
