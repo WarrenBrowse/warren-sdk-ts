@@ -52,7 +52,8 @@ export class WarrenWebClient {
     return this.api.pullPendingVoucher(wpid, pullSecret);
   }
 
-  /** `GET /v1/multihop/directory` (unsigned). The signed directory JSON, or `null`. */
+  /** The signed multi-hop directory JSON (unsigned): `GET /v2/multihop/directory`,
+   * falling back to `/v1` on a `404`; `null` when neither route publishes one. */
   multihopDirectory(): Promise<string | null> {
     return this.api.multihopDirectory();
   }

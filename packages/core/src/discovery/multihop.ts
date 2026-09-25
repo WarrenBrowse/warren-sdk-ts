@@ -46,6 +46,11 @@ export interface VerifiedExit {
   readonly exitX25519PubkeyHex: string;
   /** QUIC endpoint to dial (the entry-relay endpoint). */
   readonly endpoint: string;
+  /** The same relay on its other address family (the `/v2` directory's
+   * `endpoint_v6`), what a client with no IPv4 route dials. Server-envelope
+   * tier like {@link endpoint}: the RPK pin, not the address, binds identity.
+   * Absent when the relay binds one family only. */
+  readonly endpointV6?: string;
   readonly country: string;
   readonly city: string;
   readonly weight: number;
@@ -152,6 +157,9 @@ interface CanonicalNode {
     relay_id: string;
     relay_ed25519_pubkey: string;
     endpoint: string;
+    // The relay's other address family (the /v2 route); frozen between endpoint
+    // and cover_domain, skipped when absent, outside the descriptor signature.
+    endpoint_v6?: string;
     // ADR-0004 X.509 cover-domain SNI; optional, outside the descriptor signature.
     cover_domain?: string;
     // TLS-over-TCP carrier capability; frozen after cover_domain, skipped when
@@ -190,7 +198,7 @@ function validateNode(raw: unknown, i: number): CanonicalNode {
   const relayRaw = asObject(
     node.relay,
     ['relay_id', 'relay_ed25519_pubkey', 'endpoint', 'signature'],
-    ['cover_domain', 'tcp_fallback'],
+    ['endpoint_v6', 'cover_domain', 'tcp_fallback'],
     `nodes[${i}].relay`,
   );
   const exitRaw = asObject(
@@ -230,6 +238,9 @@ function validateNode(raw: unknown, i: number): CanonicalNode {
       relay_id: asFixedHex(relayRaw.relay_id, 16, 'relay_id'),
       relay_ed25519_pubkey: asFixedHex(relayRaw.relay_ed25519_pubkey, 32, 'relay_ed25519_pubkey'),
       endpoint: asString(relayRaw.endpoint, 'relay.endpoint'),
+      ...(relayRaw.endpoint_v6 !== undefined
+        ? { endpoint_v6: asString(relayRaw.endpoint_v6, 'relay.endpoint_v6') }
+        : {}),
       ...(relayRaw.cover_domain !== undefined
         ? { cover_domain: asString(relayRaw.cover_domain, 'relay.cover_domain') }
         : {}),
@@ -270,6 +281,7 @@ function canonicalNode(n: CanonicalNode): unknown {
     relay_ed25519_pubkey: n.relay.relay_ed25519_pubkey,
     endpoint: n.relay.endpoint,
   };
+  if (n.relay.endpoint_v6 !== undefined) relay.endpoint_v6 = n.relay.endpoint_v6;
   if (n.relay.cover_domain !== undefined) relay.cover_domain = n.relay.cover_domain;
   // Frozen after cover_domain (the Rust serde declaration order); skip_serializing_if
   // is_false, so an absent/false capability re-serializes byte-identical.
@@ -542,6 +554,7 @@ export function verifyMultihopDirectory(
       exitX25519PubkeyHex: n.exit.exit_x25519_multihop_pubkey,
       // The client dials the entry relay, never the exit egress IP (redacted).
       endpoint: n.relay.endpoint,
+      ...(n.relay.endpoint_v6 !== undefined ? { endpointV6: n.relay.endpoint_v6 } : {}),
       country: n.country,
       city: n.city,
       weight: n.weight,

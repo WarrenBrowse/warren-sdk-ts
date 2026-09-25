@@ -26,7 +26,7 @@ npm install @warrenbrowse/sdk-core
 ### Account API
 
 - `new WarrenApiClient({ baseUrl, seed?, transport?, alternativeHosts?, now?, nonce? })`.
-- The full `/v1/*` endpoint set: `exits()`, `register()`, `subscription()`, `check()`, `deleteAccount()`, `sessionOpen()`, `sessionClose()`, `submitSupport()`, `initApplePayment()`, `checkApplePayment()`, `reportExitDown()`, `reportPubkeyMismatch()`, `pullPendingVoucher()`, `multihopDirectory()`.
+- The full `/v1/*` endpoint set: `exits()`, `register()`, `subscription()`, `check()`, `deleteAccount()`, `sessionOpen()`, `sessionClose()`, `submitSupport()`, `initApplePayment()`, `checkApplePayment()`, `reportExitDown()`, `reportPubkeyMismatch()`, `pullPendingVoucher()`, and `multihopDirectory()` (the dual-stack `/v2/multihop/directory`, falling back to `/v1` on a `404`; each exit's `endpointV6` carries the relay's second address family for IPv6-only networks).
 - `HttpTransport` seam with a default isomorphic `fetch` transport; anti-censorship host fallback (primary, alternative hosts, then no-SNI, advancing only on connect failures); typed, redacted `WarrenApiError` / `WarrenTransportError`; `dispose()` zeroizes the signing key.
 
 ### Discovery

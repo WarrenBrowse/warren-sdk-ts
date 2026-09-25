@@ -40,6 +40,10 @@ interface NodeOpts {
   relayTcpFallback?: boolean;
   /** The exit's cover domain, the name a browser proxy dials and validates. */
   coverDomain?: string;
+  /** The relay's second address family (`/v2` route), after `endpoint`. */
+  relayEndpointV6?: string;
+  /** The relay's X.509 cover-domain SNI, after `endpoint_v6`. */
+  relayCoverDomain?: string;
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: a freely-mutable wire object for minting test fixtures.
@@ -84,8 +88,10 @@ function node(op: Uint8Array, tag: number, country: string, asn: number, o: Node
     relay_ed25519_pubkey: bytesToHex(relayEd),
     endpoint,
   };
-  // Frozen after cover_domain (absent here) and before signature, matching the
-  // Rust serde declaration order; skipped when false.
+  // Frozen in the Rust serde declaration order: endpoint, endpoint_v6,
+  // cover_domain, tcp_fallback, signature; each skipped when absent.
+  if (o.relayEndpointV6 !== undefined) relay.endpoint_v6 = o.relayEndpointV6;
+  if (o.relayCoverDomain !== undefined) relay.cover_domain = o.relayCoverDomain;
   if (o.relayTcpFallback) relay.tcp_fallback = true;
   relay.signature = o.badRelaySig ? '00'.repeat(64) : sign(op, RELAY_V1, relayId, relayEd);
   // biome-ignore lint/suspicious/noExplicitAny: mutable wire node fixture.
@@ -427,6 +433,47 @@ describe('verifyMultihopDirectory relay tcp_fallback carrier capability', () => 
       '"endpoint":"198.51.100.10:443"',
       '"endpoint":"198.51.100.10:443","tcp_fallback":true',
     );
+    expect(expectError(() => verifyMultihopDirectory(tampered, [serverPin])).code).toBe(
+      'bad_envelope_signature',
+    );
+  });
+});
+
+describe('verifyMultihopDirectory relay endpoint_v6 (the /v2 route)', () => {
+  const V6 = '[2001:db8::10]:443';
+
+  it('verifies a relay carrying its second address family and surfaces it on the exit', () => {
+    const json = mint(ROOT, OP, SERVER, [
+      node(OP, 10, 'RO', 100, {
+        relayEndpointV6: V6,
+        relayCoverDomain: 'cover.example',
+        relayTcpFallback: true,
+      }),
+    ]);
+
+    const dir = verifyMultihopDirectory(json, [serverPin], [rootPin]);
+
+    expect(dir.dropped).toBe(0);
+    expect(dir.exits[0]?.endpoint).toBe('198.51.100.10:443');
+    expect(dir.exits[0]?.endpointV6).toBe(V6);
+  });
+
+  it('leaves endpointV6 absent for a relay with a single address family', () => {
+    const json = mint(ROOT, OP, SERVER, [node(OP, 10, 'RO', 100)]);
+
+    const exit = verifyMultihopDirectory(json, [serverPin], [rootPin]).exits[0];
+
+    expect(exit).toBeDefined();
+    expect(exit && 'endpointV6' in exit).toBe(false);
+  });
+
+  it('rejects an endpoint_v6 injected after signing (proves it is inside the envelope)', () => {
+    const json = mint(ROOT, OP, SERVER, [node(OP, 10, 'RO', 100)]);
+    const tampered = json.replace(
+      '"endpoint":"198.51.100.10:443"',
+      `"endpoint":"198.51.100.10:443","endpoint_v6":"${V6}"`,
+    );
+
     expect(expectError(() => verifyMultihopDirectory(tampered, [serverPin])).code).toBe(
       'bad_envelope_signature',
     );

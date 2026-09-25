@@ -195,9 +195,28 @@ export class WarrenApiClient {
     );
   }
 
-  /** `GET /v1/multihop/directory` (unsigned). The signed directory JSON, or null if unpublished. */
+  /**
+   * The signed multi-hop directory JSON (unsigned call), asked for on the
+   * dual-stack `GET /v2/multihop/directory` and falling back to the frozen
+   * `GET /v1/multihop/directory` on a `404`; `null` when neither route has one
+   * published. Verify it with `verifyMultihopDirectory`, which reads both.
+   *
+   * Two routes because the `/v1` body can never gain a field (its envelope is
+   * verified against a re-serialization of the parsed nodes, so a field an
+   * older client does not know breaks the signature), and a client on an
+   * IPv6-only network needs each relay's second address (`endpoint_v6`) to
+   * dial anything. A backend that predates `/v2` answers `404` there. Any
+   * other failure is not retried on `/v1`, as in the Rust client.
+   */
   async multihopDirectory(): Promise<string | null> {
-    const res = await this.request('GET', '/v1/multihop/directory', { signed: false });
+    return (
+      (await this.multihopDirectoryAt('/v2/multihop/directory')) ??
+      (await this.multihopDirectoryAt('/v1/multihop/directory'))
+    );
+  }
+
+  private async multihopDirectoryAt(path: string): Promise<string | null> {
+    const res = await this.request('GET', path, { signed: false });
     if (res.status === 404) return null;
     return this.expectOk(res).body;
   }

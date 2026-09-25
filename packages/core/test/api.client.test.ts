@@ -427,12 +427,41 @@ describe('WarrenApiClient extended endpoints', () => {
     expect(err.code).toBe('response');
   });
 
-  it('multihopDirectory returns null on 404 and the raw JSON on 200', async () => {
-    const missing = signedClient(() => ({ status: 404, body: '' }));
-    const present = signedClient(() => ok('{"dir":1}'));
-    expect(await missing.client.multihopDirectory()).toBeNull();
-    expect(await present.client.multihopDirectory()).toBe('{"dir":1}');
-    expect(header(present.requests[0]!, 'X-Warren-Sig')).toBeUndefined();
+  it('multihopDirectory asks the dual-stack route first, unsigned', async () => {
+    const { client, requests } = signedClient(() => ok('{"dir":2}'));
+
+    expect(await client.multihopDirectory()).toBe('{"dir":2}');
+    expect(requests.map((r) => r.url)).toEqual(['https://api.example.com/v2/multihop/directory']);
+    expect(header(requests[0]!, 'X-Warren-Sig')).toBeUndefined();
+  });
+
+  it('multihopDirectory falls back to the frozen route on a 404', async () => {
+    // A backend that predates /v2 answers 404 there and still serves /v1.
+    const { client, requests } = signedClient((req) =>
+      req.url.includes('/v2/') ? { status: 404, body: '' } : ok('{"dir":1}'),
+    );
+
+    expect(await client.multihopDirectory()).toBe('{"dir":1}');
+    expect(requests.map((r) => r.url)).toEqual([
+      'https://api.example.com/v2/multihop/directory',
+      'https://api.example.com/v1/multihop/directory',
+    ]);
+  });
+
+  it('multihopDirectory returns null when neither route has a directory', async () => {
+    const { client } = signedClient(() => ({ status: 404, body: '' }));
+
+    expect(await client.multihopDirectory()).toBeNull();
+  });
+
+  it('multihopDirectory does not fall back on a server error', async () => {
+    const { client, requests } = signedClient(() => ({ status: 503, body: '' }));
+
+    const err = await client.multihopDirectory().catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(WarrenApiError);
+    expect((err as WarrenApiError).status).toBe(503);
+    expect(requests).toHaveLength(1);
   });
 });
 
