@@ -37,6 +37,29 @@ split, per-environment capabilities, the napi-rs and warrend bindings),
 | `@warrenbrowse/sdk-node` | Node/Electron datapath: `ProxyTunnel` (napi-rs engine) + `WarrendClient` (warrend IPC) |
 | `@warrenbrowse/sdk-web` | browser control plane, no signing key in the page |
 | `@warrenbrowse/sdk-extension` | MV3 browser-extension VPN (`chrome.proxy` + native messaging) plus its Node native host |
+| `packages/extension/native-host` (Rust, not a pnpm package) | `warren-host`, the helper users install: one binary linking `warren-sdk`, speaking the same native messaging protocol as the Node host |
+
+## The helper (`warren-host`): what the extension depends on
+
+- **It is the shipped host; the Node host stays for SDK consumers.** Both speak
+  `packages/extension/src/protocol.ts` (version 3): a protocol change lands in
+  both, with the Rust session tests mirroring `test/host.session.test.ts`.
+- **Released on its own tag series**, `host-beta-v*` (beta, prerelease) and
+  `host-v*` (prod), by `release-host.yml` on the self-hosted fleet, as public
+  GitHub release assets (binaries, `Warren-Helper.pkg`,
+  `Warren-Helper-Setup.exe`, `install.sh`, `install.ps1`, `SHA256SUMS`). The
+  asset names are a contract: warren-extension's setup page links them, and its
+  `helperRelease` anchor pins the tag it installs. Renaming an asset breaks every
+  published extension.
+- **Each build admits only its channel's extension ids** (the Chromium ids the
+  extension's manifest `key` fixes, and the gecko ids); both channels register
+  the same host name, so one channel's install replaces the other's.
+- **It must die with its port.** The browser spawns it per native messaging
+  port; `WarrenBrowserVpn` closes a port that only answered a question, and the
+  extension's promise to users ("it runs only while you are connected") rests on
+  that. Its pin of `warren-sdk` matches warren-napi's; CI checks the two agree.
+- Architecture across repos (app, SDK, helper, extension, update host):
+  warren-extension `docs/ARCHITECTURE.md`.
 
 ## Gates (the CI order, `.github/workflows/ci.yml`)
 
