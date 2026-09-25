@@ -36,6 +36,15 @@ const BLINDING_SALT = utf8ToBytes('warren/token-blinding/v1');
 export const BLINDING_PURPOSE_BROWSER_PROXY = 'browser-proxy/v1';
 
 /**
+ * The `purpose` of the session (tunnel) credential class, the label the Rust
+ * SDK and the desktop app derive with (`BLINDING_PURPOSE_SESSION`). The issuer
+ * serves one batch per account and epoch, so a client of the wallet that minted
+ * this class from the CSPRNG would reserve the epoch and lock every other
+ * client of the wallet out of it.
+ */
+export const BLINDING_PURPOSE_SESSION = 'session/v1';
+
+/**
  * A byte source for one blinded token request. {@link blindToken} draws its
  * nonce, its PSS salt and its blinding factor from it, in that order.
  */

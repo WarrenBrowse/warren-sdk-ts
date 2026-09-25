@@ -81,6 +81,7 @@ export {
 } from './token-acquire.js';
 export {
   BLINDING_PURPOSE_BROWSER_PROXY,
+  BLINDING_PURPOSE_SESSION,
   blindingKeyFromSeed,
   deterministicTokenRandom,
   type TokenRandom,
