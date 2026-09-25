@@ -44,7 +44,7 @@ if [ -z "$user" ] || [ "$user" = "root" ] || [ "$user" = "loginwindow" ]; then
   echo "warren helper: no user is logged in at the console; run 'warren-host install' as the user" >&2
   exit 0
 fi
-home="$(dscl . -read "/Users/$user" NFSHomeDirectory | awk '{print $2}')"
+home="$(dscl . -read "/Users/$user" NFSHomeDirectory | sed 's/^NFSHomeDirectory: //')"
 if [ "$(id -u)" -eq 0 ]; then
   exec sudo -u "$user" -H env HOME="$home" "$here/warren-host" install
 fi

@@ -18,7 +18,13 @@ set -eu
 
 warren_helper_install() {
   tag='__WARREN_HOST_TAG__'
-  base="${WARREN_HELPER_BASE_URL:-https://github.com/WarrenBrowse/warren-sdk-ts/releases/download/$tag}"
+  base="https://github.com/WarrenBrowse/warren-sdk-ts/releases/download/$tag"
+  # HTTPS only, unless a test points the script at another source.
+  proto='=https'
+  if [ -n "${WARREN_HELPER_BASE_URL:-}" ]; then
+    base="$WARREN_HELPER_BASE_URL"
+    proto='=http,https'
+  fi
 
   die() {
     echo "warren helper: $*" >&2
@@ -50,8 +56,8 @@ warren_helper_install() {
   trap 'rm -rf "$tmp"' EXIT INT TERM
 
   echo "Downloading the Warren helper ($asset)..."
-  curl -fsSL "$base/$asset" -o "$tmp/warren-host" || die "download failed: $base/$asset"
-  curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || die "download failed: $base/SHA256SUMS"
+  curl -fsSL --proto "$proto" "$base/$asset" -o "$tmp/warren-host" || die "download failed: $base/$asset"
+  curl -fsSL --proto "$proto" "$base/SHA256SUMS" -o "$tmp/SHA256SUMS" || die "download failed: $base/SHA256SUMS"
 
   expected="$(awk -v a="$asset" '$2 == a || $2 == "*" a { print $1; exit }' "$tmp/SHA256SUMS")"
   [ -n "$expected" ] || die "SHA256SUMS has no entry for $asset"
