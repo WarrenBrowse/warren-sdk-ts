@@ -28,6 +28,8 @@
 
 import {
   type ControlMessage,
+  INDEPENDENT_SESSION_PLACEMENT,
+  type SessionTokenLease,
   type VerifiedExit,
   WARREN_EDGE_PORT,
   WarrenClientSession,
@@ -36,6 +38,7 @@ import {
   decodeControlMessage,
   decodeMultihopFrame,
   encodeIpRequestV7,
+  walkSessionTokens,
 } from '@warrenbrowse/sdk-core';
 
 /** The subset of the WHATWG streams + WebTransport surface this transport uses,
@@ -91,6 +94,9 @@ export interface WarrenEdgeOptions {
   /** Fixed HPKE ephemeral private key. TEST-ONLY, for deterministic vectors;
    * production omits it so a fresh CSPRNG ephemeral (forward secrecy) is used. */
   ephemeralPrivForTest?: Uint8Array;
+  /** The hold on the session token this connection presents
+   * (`TokenManager.claim`), released by {@link WarrenEdgeConnection.close}. */
+  lease?: SessionTokenLease;
 }
 
 /**
@@ -172,6 +178,7 @@ export class WarrenEdgeConnection {
     private readonly wt: WebTransportLike,
     /** The HPKE sender session bound to the exit. */
     readonly session: WarrenClientSession,
+    private readonly lease: SessionTokenLease | undefined,
   ) {}
 
   /** Opens the WebTransport session and sets up the HPKE sender against the
@@ -189,7 +196,7 @@ export class WarrenEdgeConnection {
       options.exitId,
       selectSessionEphemeral(options),
     );
-    return new WarrenEdgeConnection(wt, session);
+    return new WarrenEdgeConnection(wt, session, options.lease);
   }
 
   /**
@@ -221,10 +228,14 @@ export class WarrenEdgeConnection {
   async openTunnel(params: {
     tokens: Uint8Array[];
     wantsIpv6?: boolean;
+    /** The session-placement hint (`prefer_ipv4`): `0.0.0.0` for an
+     * independent session, the session's address for a bonded leg. */
+    preferIpv4?: Uint8Array;
   }): Promise<ControlMessage> {
     const request = encodeIpRequestV7({
       tokens: params.tokens,
       ...(params.wantsIpv6 !== undefined ? { wantsIpv6: params.wantsIpv6 } : {}),
+      ...(params.preferIpv4 !== undefined ? { preferIpv4: params.preferIpv4 } : {}),
     });
     const replyPlaintext = await this.setup(request);
     return decodeControlMessage(replyPlaintext);
@@ -263,9 +274,10 @@ export class WarrenEdgeConnection {
     }
   }
 
-  /** Close the WebTransport session. */
+  /** Close the WebTransport session and release its session token. */
   close(): void {
     this.wt.close();
+    this.lease?.release();
   }
 
   private nextSeq(): bigint {
@@ -277,12 +289,18 @@ export class WarrenEdgeConnection {
 
 /** Everything a caller needs to reach a Warren exit via the EdgeConnect tier. */
 export interface ConnectEdgeParams {
-  /** Pre-minted v7 session tokens (serialized `SessionToken` bytes) for the
-   * current epoch, obtained AHEAD of this dial from a `TokenManager`
-   * (`tokenManager.takeCurrentStack(now)`). Minting is deliberately NOT done
-   * here: issuing at connect time would correlate the wallet-named issuance with
-   * this anonymous session (doc 64). An empty array is refused. */
+  /** The current epoch's pre-minted v7 session tokens (serialized
+   * `SessionToken` bytes) in the order to try them, obtained AHEAD of this dial
+   * from a `TokenManager` (`tokenManager.sessionStack(now)`). Minting is
+   * deliberately NOT done here: issuing at connect time would correlate the
+   * wallet-named issuance with this anonymous session (doc 64). An empty array
+   * is refused. */
   tokens: Uint8Array[];
+  /** Holds a token for this session before it is presented
+   * (`tokenManager.claim`), so no other session of the process leads with it;
+   * the admitted connection releases it on close. Without it, no token is
+   * held. */
+  claim?: (token: Uint8Array) => SessionTokenLease | undefined;
   /** The edge WebTransport URL, e.g. `https://sg1.edge.example.com:8443/warren`
    * (the well-known {@link WARREN_EDGE_PORT}). */
   url: string;
@@ -301,15 +319,12 @@ export interface ConnectEdgeParams {
   ephemeralPrivForTest?: Uint8Array;
 }
 
-/** Validate the pre-minted stack and open the WebTransport session, the shared
- * prelude for {@link connectEdgeTunnel}'s control-message setup. */
-async function openWithTokens(
+/** Opens one WebTransport session for a token walk attempt. */
+function openForAttempt(
   params: ConnectEdgeParams,
-): Promise<{ connection: WarrenEdgeConnection; tokens: Uint8Array[] }> {
-  if (params.tokens.length === 0) {
-    throw new WarrenEdgeError('token_issuer', 'no pre-minted session tokens for this epoch');
-  }
-  const connection = await WarrenEdgeConnection.open({
+  lease: SessionTokenLease | undefined,
+): Promise<WarrenEdgeConnection> {
+  return WarrenEdgeConnection.open({
     url: params.url,
     exitX25519Pubkey: params.exitX25519Pubkey,
     exitId: params.exitId,
@@ -318,30 +333,56 @@ async function openWithTokens(
       : {}),
     ...(params.webTransportFactory ? { webTransportFactory: params.webTransportFactory } : {}),
     ...(params.ephemeralPrivForTest ? { ephemeralPrivForTest: params.ephemeralPrivForTest } : {}),
+    ...(lease ? { lease } : {}),
   });
-  return { connection, tokens: params.tokens };
 }
 
 /**
- * One-call EdgeConnect tier bring-up: open the WebTransport session with
- * PRE-MINTED session tokens and decode the exit's reply as a
- * {@link ControlMessage} ({@link openTunnel}). A real Warren exit answers the
- * setup stream with an `IpAssign` (the tunnel IP on admission) or a typed
- * `Rejected` / `IpExhausted` / `ExitDraining`.
+ * One-call EdgeConnect tier bring-up: walk the PRE-MINTED session tokens, one
+ * WebTransport session and one {@link WarrenEdgeConnection.openTunnel} per
+ * token, until the exit answers anything but `Rejected`. A real Warren exit
+ * answers the setup stream with an `IpAssign` (the tunnel IP on admission) or a
+ * typed `IpExhausted` / `ExitDraining`, returned for the caller to inspect.
+ *
+ * Every client of the wallet holds the same tokens, and the exit refuses a
+ * serial another session holds anywhere in the fleet with the same `Rejected`
+ * as an invalid token, spending nothing: so a refused setup is closed and the
+ * next one leads with the next token (`walkSessionTokens`, at most
+ * `MAX_SESSION_TOKENS` setups). Each setup declares an independent session
+ * (`prefer_ipv4 = 0.0.0.0`), as the Rust SDK does.
  *
  * This is the browser-side entry point for the zero-install tier: a LOWER
  * protection tier than the native host datapath (nested TLS-over-HTTP/3),
  * carrying only code-initiated traffic; surface it labelled as such.
  *
- * @throws {WarrenEdgeError} `token_issuer` if `tokens` is empty; `handshake` if
- * the environment has no WebTransport.
+ * @throws {WarrenEdgeError} `token_issuer` if `tokens` is empty;
+ * `no_session_token` if no token could be claimed or the exit refused every
+ * one; `handshake` if the environment has no WebTransport.
  */
 export async function connectEdgeTunnel(
   params: ConnectEdgeParams,
 ): Promise<{ connection: WarrenEdgeConnection; control: ControlMessage }> {
-  const { connection, tokens } = await openWithTokens(params);
-  const control = await connection.openTunnel({ tokens });
-  return { connection, control };
+  if (params.tokens.length === 0) {
+    throw new WarrenEdgeError('token_issuer', 'no pre-minted session tokens for this epoch');
+  }
+  const walked = await walkSessionTokens(
+    params.tokens,
+    async (token, lease) => {
+      const connection = await openForAttempt(params, lease);
+      try {
+        const control = await connection.openTunnel({
+          tokens: [token],
+          preferIpv4: INDEPENDENT_SESSION_PLACEMENT,
+        });
+        return { connection, control, close: () => connection.close() };
+      } catch (error) {
+        connection.close();
+        throw error;
+      }
+    },
+    params.claim,
+  );
+  return { connection: walked.attempt.connection, control: walked.attempt.control };
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -385,6 +426,7 @@ export async function connectEdgeTunnelToExit(
   exit: VerifiedExit,
   params: {
     tokens: Uint8Array[];
+    claim?: (token: Uint8Array) => SessionTokenLease | undefined;
     features?: number;
     webTransportFactory?: (url: string, options: unknown) => WebTransportLike;
     ephemeralPrivForTest?: Uint8Array;
@@ -398,6 +440,7 @@ export async function connectEdgeTunnelToExit(
   }
   return connectEdgeTunnel({
     tokens: params.tokens,
+    ...(params.claim ? { claim: params.claim } : {}),
     url: `https://${hostOf(exit.endpoint)}:${WARREN_EDGE_PORT}/warren`,
     exitX25519Pubkey: hexToBytes(exit.exitX25519PubkeyHex),
     exitId: hexToBytes(exit.exitIdHex),

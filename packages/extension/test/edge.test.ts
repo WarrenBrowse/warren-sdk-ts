@@ -1,4 +1,8 @@
-import { decodeMultihopFrame } from '@warrenbrowse/sdk-core';
+import {
+  type SessionTokenLease,
+  WarrenEdgeError,
+  decodeMultihopFrame,
+} from '@warrenbrowse/sdk-core';
 import { describe, expect, it } from 'vitest';
 
 const hexToBytes = (hex: string): Uint8Array => new Uint8Array(Buffer.from(hex, 'hex'));
@@ -8,6 +12,7 @@ import {
   type EdgeWritable,
   WarrenEdgeConnection,
   type WebTransportLike,
+  connectEdgeTunnel,
   selectSessionEphemeral,
 } from '../src/edge.js';
 
@@ -207,5 +212,93 @@ describe('WarrenEdgeConnection', () => {
     const sent = decodeMultihopFrame(capture.setupWrites[0]!);
     expect(Array.from(sent.exitId)).toEqual(Array.from(EXIT_ID));
     expect(sent.ciphertext.length).toBe(6 + 354 + 1); // header + 354-byte token + wants_daita
+  });
+});
+
+describe('connectEdgeTunnel token walk', () => {
+  // Every client of a wallet holds the same session tokens and an exit spends
+  // the first token of a request that verifies, so a stack presented at once
+  // would stop at a serial another session holds. Each setup leads with one.
+  const stack = [new Uint8Array(354).fill(0xcd), new Uint8Array(354).fill(0xce)];
+
+  function registry(heldAtStart: number[] = []) {
+    const held = new Set(heldAtStart);
+    const claim = (t: Uint8Array): SessionTokenLease | undefined => {
+      const marker = t[0] ?? -1;
+      if (held.has(marker)) return undefined;
+      held.add(marker);
+      return { release: () => held.delete(marker) };
+    };
+    return { claim, held };
+  }
+
+  function params(capture: FakeCapture, dials: { count: number }) {
+    return {
+      url: 'https://edge.test:51443/warren',
+      exitX25519Pubkey: EXIT_PUB,
+      exitId: EXIT_ID,
+      ephemeralPrivForTest: EPHEMERAL,
+      webTransportFactory: () => {
+        dials.count += 1;
+        return fakeWebTransport(capture);
+      },
+    };
+  }
+
+  it('presents the lead token alone, with the independent-session placement hint', async () => {
+    const capture: FakeCapture = { setupWrites: [], datagramWrites: [] };
+    const dials = { count: 0 };
+
+    // The fake exit's reply is no control message, which ends the walk.
+    await expect(connectEdgeTunnel({ ...params(capture, dials), tokens: stack })).rejects.toThrow(
+      /not a control message/,
+    );
+
+    expect(dials.count).toBe(1);
+    expect(capture.setupWrites).toHaveLength(1);
+    // 0xC0 0x03 0x05 | Some(0.0.0.0) | wants_ipv6 | count=1 | token | wants_daita
+    const sent = decodeMultihopFrame(capture.setupWrites[0]!);
+    expect(sent.ciphertext.length).toBe(3 + 5 + 1 + 1 + 354 + 1);
+  });
+
+  it('releases the claimed token when the setup fails', async () => {
+    const capture: FakeCapture = { setupWrites: [], datagramWrites: [] };
+    const { claim, held } = registry();
+
+    await expect(
+      connectEdgeTunnel({ ...params(capture, { count: 0 }), tokens: stack, claim }),
+    ).rejects.toThrow(/not a control message/);
+
+    expect(held.size).toBe(0);
+  });
+
+  it('dials nothing when every token is held by a live session', async () => {
+    const capture: FakeCapture = { setupWrites: [], datagramWrites: [] };
+    const dials = { count: 0 };
+    const { claim } = registry([0xcd, 0xce]);
+
+    const err = await connectEdgeTunnel({ ...params(capture, dials), tokens: stack, claim }).catch(
+      (e: unknown) => e,
+    );
+
+    expect(err).toBeInstanceOf(WarrenEdgeError);
+    expect((err as WarrenEdgeError).code).toBe('no_session_token');
+    expect(dials.count).toBe(0);
+  });
+
+  it('holds the admitted token until the connection closes', async () => {
+    const { claim, held } = registry();
+    const lease = claim(stack[0]!);
+    const conn = await WarrenEdgeConnection.open({
+      url: 'https://edge.test:51443/warren',
+      exitX25519Pubkey: EXIT_PUB,
+      exitId: EXIT_ID,
+      webTransportFactory: () => fakeWebTransport({ setupWrites: [], datagramWrites: [] }),
+      ...(lease ? { lease } : {}),
+    });
+
+    expect(held.has(0xcd)).toBe(true);
+    conn.close();
+    expect(held.has(0xcd)).toBe(false);
   });
 });

@@ -12,6 +12,10 @@ export type WarrenEdgeErrorCode =
    * drawn from the CSPRNG would reserve the account's epoch and lock every
    * other client of the wallet out of it, so none is ever sent. */
   | 'no_blinding_key'
+  /** No anonymous session token was admitted: none was free to present, or the
+   * exit refused every one (a serial leased elsewhere, or an invalid token).
+   * Says nothing about the account; a later attempt can succeed. */
+  | 'no_session_token'
   /** The WebTransport handshake or transport to the edge failed. */
   | 'handshake';
 

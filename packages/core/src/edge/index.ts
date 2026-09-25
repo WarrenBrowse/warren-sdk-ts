@@ -87,6 +87,12 @@ export {
   type TokenRandom,
 } from './token-blinding.js';
 export {
+  INDEPENDENT_SESSION_PLACEMENT,
+  type SessionAttempt,
+  type SessionWalkResult,
+  walkSessionTokens,
+} from './session-walk.js';
+export {
   InMemoryTokenPersistence,
   type SessionTokenLease,
   TokenManager,
