@@ -41,12 +41,19 @@ jobs:
   build:
     name: addon (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    # The Linux .node links glibc and ships to users, so it is built inside the
+    # Debian 11 job image (glibc 2.31) rather than on ubuntu-24.04 (2.39). The
+    # darwin leg has no container.
+    container: ${{ matrix.container }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - name: linux-x64
-            runner: [self-hosted, Linux, X64, libra]
+            runner: ubuntu-24.04
+            container:
+              image: ghcr.io/warrenbrowse/warren-ci-linux:bullseye-e03e4fc686d82f6b1cbea663ec9032c76960b5ee
+              options: --user root
             target: x86_64-unknown-linux-gnu
           - name: darwin-arm64
             runner: [self-hosted, macOS, ARM64]
@@ -117,10 +124,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      # Install the pinned toolchain on every runner: the libra Linux runner
-      # has no ambient rustup, and the macOS ARM64 runner has rust but not
-      # rustup on this job's PATH (a bare `rustup target add` there fails with
-      # "command not found"). dtolnay provides rustup + the host target on all.
+      # Install the pinned toolchain on every runner: the macOS ARM64 runner
+      # has rust but not rustup on this job's PATH (a bare `rustup target add`
+      # there fails with "command not found"). dtolnay provides rustup + the host target on all.
       # The version follows warren-sdk-rs's rust-toolchain.toml, the engine's
       # floor (smoltcp 0.14 needs 1.91).
       - uses: dtolnay/rust-toolchain@1.91.0

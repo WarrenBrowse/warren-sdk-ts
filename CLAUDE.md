@@ -79,10 +79,10 @@ Datapath features are additionally validated against a real exit / the real
 daemon: `CONTRIBUTING.md`, "Live validations".
 
 Runners: Linux and Windows jobs run on GitHub-hosted runners (`ubuntu-24.04`,
-`ubuntu-24.04-arm`, `windows-2025`), macOS jobs on the self-hosted Mac. One
-Linux job stays self-hosted on purpose: native-prebuilds.yml `linux-x64` builds a
-glibc-linked addon shipped to users, and the libra pool's Debian 11 image holds
-its glibc 2.31 floor. Every Windows leg (ci.yml `js-windows`, native-prebuilds.yml
+`ubuntu-24.04-arm`, `windows-2025`), macOS jobs on the self-hosted Mac.
+native-prebuilds.yml `linux-x64` builds a glibc-linked addon shipped to users,
+so it runs inside the Debian 11 job image `ghcr.io/warrenbrowse/warren-ci-linux`
+(glibc 2.31 floor; ubuntu-24.04 would raise it to 2.39). Every Windows leg (ci.yml `js-windows`, native-prebuilds.yml
 `addon-windows`, release-host.yml `build-windows`) runs its
 `scripts/ci/codemagic/*.sh` phases in Git Bash under `watchdog.sh`, a
 byte-identical copy of warren-app's; `test-watchdog.sh` fails CI if a workflow
