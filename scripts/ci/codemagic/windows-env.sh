@@ -1,16 +1,11 @@
 # shellcheck shell=bash
 #
-# Build environment for a Codemagic windows_x2 machine (Git Bash), sourced by
-# the scripts/ci/codemagic/*.sh entry points. Every build starts on a fresh VM
-# (Windows Server 2022, x64, VS 2022 17.14, Git, Python 3.9, Node 20.12) with
-# no Rust and no pnpm, so both are installed here.
-#
-# codemagic.yaml caches downloads only, for the addon and helper workflows
-# (windows-js has none, it did not pay): rustup's toolchains, ~/.cargo/bin,
-# cargo's registry and git sources, the Node release in use, corepack's pnpm
-# and the pnpm store. A shipped addon or helper always compiles from a clean
-# target/. `scripts/codemagic-cache.sh clear warren-sdk-ts` in the workspace
-# empties the caches.
+# Build environment for a GitHub-hosted windows-2025 runner (Git Bash), sourced
+# by the scripts/ci/codemagic/*.sh entry points. Every job starts on a fresh
+# VM: rustup is installed when absent, Node comes from nodejs.org at the newest
+# release of the requested line, and pnpm from corepack. Nothing is cached
+# between jobs, so a shipped addon or helper always compiles from a clean
+# target/.
 
 set -euo pipefail
 
@@ -19,14 +14,14 @@ set -euo pipefail
 exec < /dev/null
 
 
-# Codemagic's PowerShell profile (posh-sshell, Start-SshAgent, the build's
-# variables) makes every Windows PowerShell that loads it hold its caller's
-# output open: `x="$(powershell.exe -Command 'Write-Output ok')"` never
-# returned, the same call with -NoProfile did in 2 s (self-test of
-# 2026-09-26). The build starts PowerShell without -NoProfile in places it
-# does not own (msbuild's NMake steps, tool scripts), and whatever waits for
-# that output then hangs with no CPU. Nothing in these builds needs the
-# profile, so it is moved aside for the rest of the VM's life.
+# A PowerShell profile can make every Windows PowerShell that loads it hold
+# its caller's output open: under Codemagic's (posh-sshell, Start-SshAgent)
+# `x="$(powershell.exe -Command 'Write-Output ok')"` never returned, the same
+# call with -NoProfile did in 2 s (2026-09-26). The build starts PowerShell
+# without -NoProfile in places it does not own (msbuild's NMake steps, tool
+# scripts), and whatever waits for that output then hangs with no CPU.
+# Nothing in these builds needs a profile, so any is moved aside for the rest
+# of the VM's life.
 neutralize_powershell_profile() {
     local profile
     profile="$(powershell.exe -NoProfile -NonInteractive -Command 'Write-Output $PROFILE.CurrentUserCurrentHost' | tr -d '\r')"
@@ -137,8 +132,8 @@ checkout_sibling() { # checkout_sibling <repo> <pin file>
     echo "$repo @ $(git -C "../$repo" rev-parse HEAD)"
 }
 
-# Write outputs flat into cm-out/ with the checksum list the GitHub proxy
-# (warren-app .github/actions/codemagic-build) verifies before publishing.
+# Write outputs flat into cm-out/ with the checksum list the publishing job
+# verifies (sha256sum -c) before it uploads anything.
 export_outputs() { # export_outputs <file>...
     rm -rf cm-out
     mkdir -p cm-out

@@ -45,7 +45,7 @@ split, per-environment capabilities, the napi-rs and warrend bindings),
   `packages/extension/src/protocol.ts` (version 3): a protocol change lands in
   both, with the Rust session tests mirroring `test/host.session.test.ts`.
 - **Released on its own tag series**, `host-beta-v*` (beta, prerelease) and
-  `host-v*` (prod), by `release-host.yml` on the self-hosted fleet, as public
+  `host-v*` (prod), by `release-host.yml`, as public
   GitHub release assets (binaries, `Warren-Helper.pkg`,
   `Warren-Helper-Setup.exe`, `install.sh`, `install.ps1`, `SHA256SUMS`). The
   asset names are a contract: warren-extension's setup page links them, and its
@@ -78,11 +78,15 @@ to the private engine); build it locally per `packages/node/native/README.md`.
 Datapath features are additionally validated against a real exit / the real
 daemon: `CONTRIBUTING.md`, "Live validations".
 
-Every Windows leg (ci.yml `js-windows`, native-prebuilds.yml `addon-windows`,
-release-host.yml `build-windows`) builds on Codemagic from `codemagic.yaml` and
-`scripts/ci/codemagic/`, started through `.github/actions/codemagic-build`, a copy of warren-app's
-proxy kept byte-identical with it, like the watchdog: the `warren-codemagic`
-skill.
+Runners: Linux and Windows jobs run on GitHub-hosted runners (`ubuntu-24.04`,
+`ubuntu-24.04-arm`, `windows-2025`), macOS jobs on the self-hosted Mac. One
+Linux job stays self-hosted on purpose: native-prebuilds.yml `linux-x64` builds a
+glibc-linked addon shipped to users, and the libra pool's Debian 11 image holds
+its glibc 2.31 floor. Every Windows leg (ci.yml `js-windows`, native-prebuilds.yml
+`addon-windows`, release-host.yml `build-windows`) runs its
+`scripts/ci/codemagic/*.sh` phases in Git Bash under `watchdog.sh`, a
+byte-identical copy of warren-app's; `test-watchdog.sh` fails CI if a workflow
+step runs one of those scripts outside it.
 
 ## Downstream consumer
 

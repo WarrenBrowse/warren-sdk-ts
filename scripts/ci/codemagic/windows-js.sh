@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Codemagic `windows-js` workflow: the Windows leg of ci.yml's js job, with the
-# same commands as the Linux and macOS legs.
+# ci.yml `js-windows`: the Windows leg of the js job, with the same commands
+# as the Linux and macOS legs.
 #
 #   scripts/ci/codemagic/windows-js.sh <prepare|checks>
 set -euo pipefail

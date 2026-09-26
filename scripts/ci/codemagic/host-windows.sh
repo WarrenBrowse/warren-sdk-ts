@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Codemagic `host-windows` workflow: the windows-x86_64 lane of
-# release-host.yml. Tests and builds warren-host with a static CRT (no MSVC
-# runtime to install: the downloaded .exe runs as is), checks that it names
-# its release and channel, and ships it as Warren-Helper-Setup.exe.
+# release-host.yml `build-windows`: the windows-x86_64 lane. Tests and builds
+# warren-host with a static CRT (no MSVC runtime to install: the downloaded
+# .exe runs as is), checks that it names its release and channel, and ships it
+# as Warren-Helper-Setup.exe.
 #
 #   scripts/ci/codemagic/host-windows.sh <prepare|build>
 set -euo pipefail

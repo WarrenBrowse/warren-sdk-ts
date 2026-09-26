@@ -49,8 +49,8 @@ warren-core's own conformance suite also replays.
 ## Quality gates
 
 `pnpm build` + `pnpm lint` + `pnpm typecheck` + `pnpm test` + `pnpm coverage`,
-all green. CI runs the same on the org self-hosted runners
-(Linux/macOS/Windows) plus a coverage job. The native addon is built locally / at
+all green. CI runs the same on Linux and Windows (GitHub-hosted) and macOS
+(self-hosted) plus a coverage job. The native addon is built locally / at
 release, not in CI (the private engine uses sibling path deps a CI checkout cannot
 reproduce).
 

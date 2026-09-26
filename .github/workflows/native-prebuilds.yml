@@ -1,7 +1,11 @@
 # Builds the native proxy datapath addon (packages/node/native/warren-napi)
 # for every platform the team runs Claude Code on, so `wclaude` installs
-# without a local Rust toolchain. Runs on the org self-hosted fleet (the only
-# runners with access to the private engine repos).
+# without a local Rust toolchain.
+#
+# Runners: linux-x64 stays on the self-hosted libra pool, whose Debian 11 image
+# gives this glibc-linked addon its glibc 2.31 floor (a GitHub-hosted Ubuntu
+# would raise it for users); darwin-arm64 on the self-hosted Mac; win32-x64 on
+# a GitHub-hosted windows-2025 runner.
 #
 # Needs the ENGINE_TOKEN secret: a fine-grained PAT with contents:read on
 # WarrenBrowse/warren-sdk-rs, warrenguard and warren-contract (same one-time
@@ -22,7 +26,13 @@
 name: native-prebuilds
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to the rolling release (off: build only, a dry run)'
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   contents: write
@@ -35,8 +45,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The plain [Linux, X64] docker runner is JS-only (no rustup); the
-          # rosetta runner is the one the engine CI compiles Rust on.
           - name: linux-x64
             runner: [self-hosted, Linux, X64, libra]
             target: x86_64-unknown-linux-gnu
@@ -109,7 +117,7 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      # Install the pinned toolchain on every runner: the rosetta Linux runner
+      # Install the pinned toolchain on every runner: the libra Linux runner
       # has no ambient rustup, and the macOS ARM64 runner has rust but not
       # rustup on this job's PATH (a bare `rustup target add` there fails with
       # "command not found"). dtolnay provides rustup + the host target on all.
@@ -145,6 +153,7 @@ jobs:
       # (The wclaude launcher moved to its own repo WarrenBrowse/wclaude with
       # its own build workflow.)
       - name: Publish to the rolling release
+        if: inputs.publish
         shell: bash
         working-directory: sdk-ts
         env:
@@ -155,24 +164,36 @@ jobs:
 
   addon-windows:
     name: addon (win32-x64)
-    # Built on a Codemagic windows_x2 machine (codemagic.yaml `napi-windows`,
-    # scripts/ci/codemagic/napi-windows.sh) against the same pinned engine as
-    # the matrix legs; this job starts the build, receives the verified addon
-    # and publishes it like the others.
-    runs-on: ubuntu-latest
-    timeout-minutes: 150
+    # Built against the same pinned engine as the matrix legs
+    # (scripts/ci/codemagic/napi-windows.sh), each phase under the watchdog;
+    # the addon is published only once it matches the checksum list the build
+    # wrote.
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      CARGO_TERM_COLOR: always
+      WARREN_SHA: ${{ github.sha }}
     steps:
+      - name: Allow long paths
+        run: git config --system core.longpaths true
       - uses: actions/checkout@v4
-      - uses: ./.github/actions/codemagic-build
         with:
-          app-id: ${{ vars.CODEMAGIC_APP_ID }}
-          workflow: napi-windows
-          token: ${{ secrets.CODEMAGIC_API_TOKEN }}
-          out-dir: out
+          persist-credentials: false
+      - name: Toolchains and engine siblings
+        run: bash scripts/ci/codemagic/watchdog.sh bash scripts/ci/codemagic/napi-windows.sh prepare
+      - name: Build the addon
+        run: bash scripts/ci/codemagic/watchdog.sh bash scripts/ci/codemagic/napi-windows.sh build
+      - name: Verify the addon against the build's checksum list
+        run: cd cm-out && sha256sum -c codemagic.sha256
       - uses: actions/setup-node@v4
+        if: inputs.publish
         with:
           node-version: 20
       - name: Publish to the rolling release
+        if: inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/publish-prebuild.mjs native-prebuilds out/warren-napi.win32-x64.node
+        run: node scripts/publish-prebuild.mjs native-prebuilds cm-out/warren-napi.win32-x64.node

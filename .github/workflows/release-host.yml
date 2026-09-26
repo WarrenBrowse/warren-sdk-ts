@@ -157,15 +157,15 @@ jobs:
             target: aarch64-apple-darwin
             extra_target: x86_64-apple-darwin
             wedge_timeout: ''
-          # Native x86_64 under Rosetta: static musl needs an x86_64 musl C
-          # toolchain for ring, which only this pool's image carries.
+          # Static musl, so no glibc floor to hold: GitHub-hosted runners,
+          # with musl-gcc for ring from the musl toolchain step.
           - lane: linux-x86_64
-            runner: [self-hosted, Linux, X64, libra]
+            runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             extra_target: ''
             wedge_timeout: 70m
           - lane: linux-aarch64
-            runner: [self-hosted, Linux, ARM64, macstudio-arm64]
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             extra_target: ''
             wedge_timeout: 70m
@@ -221,8 +221,8 @@ jobs:
           # never be reused by a release.
           kind=dry; [ "$EVENT" = push ] && kind=release
           export CARGO_TARGET_DIR="$HOME/warren-host-target-$kind-$TARGET"
-          # A wedged cargo under emulation prints nothing and waits forever;
-          # only `timeout` ends it (GNU coreutils: Linux lanes only).
+          # A wedged cargo prints nothing and waits forever (seen under
+          # emulation); only `timeout` ends it (GNU coreutils: Linux lanes).
           cargo_ci() {
             if [ -n "$WEDGE_TIMEOUT" ]; then
               timeout -k 60s "$WEDGE_TIMEOUT" "$@" || { echo "::warning::retrying once: $*"; sleep 15; timeout -k 60s "$WEDGE_TIMEOUT" "$@"; }
@@ -281,26 +281,33 @@ jobs:
   build-windows:
     name: Build windows-x86_64
     needs: resolve
-    # Tested, built and checked on a Codemagic windows_x2 machine (codemagic.yaml
-    # `host-windows`, scripts/ci/codemagic/host-windows.sh), static CRT, the
-    # binary made to name its release and channel; this job starts the build,
-    # receives the verified Warren-Helper-Setup.exe and uploads it to the draft.
-    runs-on: ubuntu-latest
-    timeout-minutes: 150
+    # Tested, built and checked in Git Bash
+    # (scripts/ci/codemagic/host-windows.sh), each phase under the watchdog:
+    # static CRT, the binary made to name its release and channel. Warren-Helper-Setup.exe reaches the draft only once
+    # it matches the checksum list the build wrote.
+    runs-on: windows-2025
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+    env:
+      WARREN_SHA: ${{ github.sha }}
+      WARREN_CHANNEL: ${{ needs.resolve.outputs.channel }}
+      WARREN_VERSION: ${{ needs.resolve.outputs.version }}
     steps:
+      - name: Allow long paths
+        run: git config --system core.longpaths true
       - uses: actions/checkout@v4
         with:
-          path: sdk-ts
+          # cargo runs every dependency's build script in this job: no token
+          # stays in a git config. GH_TOKEN reaches the upload step alone.
           persist-credentials: false
-      - uses: ./sdk-ts/.github/actions/codemagic-build
-        with:
-          app-id: ${{ vars.CODEMAGIC_APP_ID }}
-          workflow: host-windows
-          token: ${{ secrets.CODEMAGIC_API_TOKEN }}
-          out-dir: out
-          inputs: |
-            channel=${{ needs.resolve.outputs.channel }}
-            version=${{ needs.resolve.outputs.version }}
+      - name: Toolchain and engine siblings
+        run: bash scripts/ci/codemagic/watchdog.sh bash scripts/ci/codemagic/host-windows.sh prepare
+      - name: Test, build and package
+        run: bash scripts/ci/codemagic/watchdog.sh bash scripts/ci/codemagic/host-windows.sh build
+      - name: Verify the installer against the build's checksum list
+        run: cd cm-out && sha256sum -c codemagic.sha256
       - uses: actions/setup-node@v4
         if: needs.resolve.outputs.publish == 'true'
         with:
@@ -310,7 +317,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
-        run: node sdk-ts/scripts/release-host.mjs upload "$RELEASE_ID" out/Warren-Helper-Setup.exe
+        run: node scripts/release-host.mjs upload "$RELEASE_ID" cm-out/Warren-Helper-Setup.exe
 
   publish:
     name: Installers, checksums and publish

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Codemagic `napi-windows` workflow: the win32-x64 leg of native-prebuilds.yml,
-# the native proxy datapath addon built against the pinned engine.
+# native-prebuilds.yml `addon-windows`: the win32-x64 native proxy datapath
+# addon, built against the pinned engine.
 #
 #   scripts/ci/codemagic/napi-windows.sh <prepare|build>
 set -euo pipefail

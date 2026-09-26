@@ -96,8 +96,8 @@ because it only runs with the native addon, which is absent in CI.
 
 ## CI
 
-`.github/workflows/ci.yml` runs on the org self-hosted runners
-(Linux/macOS/Windows) plus a coverage job. The private `warren-vectors` submodule
+`.github/workflows/ci.yml` runs on GitHub-hosted Linux and Windows runners and
+the org's self-hosted macOS runner, plus a coverage job. The private `warren-vectors` submodule
 is fetched over HTTPS with the repo-level `VECTORS_TOKEN` secret (ideally a
 fine-grained PAT with `contents:read` on `warren-sdk-ts` + `warren-vectors`). The
 native addon is **not** built in CI: the private engine uses sibling path deps to

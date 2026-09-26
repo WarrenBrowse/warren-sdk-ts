@@ -137,8 +137,8 @@ pnpm build                              # prod
 WARREN_PRODUCT_ENV=beta pnpm build      # beta
 ```
 
-CI runs this on the org self-hosted runners (Linux/macOS/Windows) plus a coverage
-job; see `.github/workflows/ci.yml`. The native proxy addon
+CI runs this on Linux and Windows (GitHub-hosted) and macOS (self-hosted) plus a
+coverage job; see `.github/workflows/ci.yml`. The native proxy addon
 (`packages/node/native`) is built locally and at release time, not in CI, because
 the private engine uses sibling path deps a CI checkout cannot reproduce.
 
