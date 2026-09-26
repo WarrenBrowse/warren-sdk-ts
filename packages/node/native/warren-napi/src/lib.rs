@@ -1057,6 +1057,7 @@ mod tests {
             exit_ed25519_pubkey: [tag; 32],
             exit_x25519_multihop_pubkey: [tag; 32],
             endpoint: format!("198.51.100.{tag}:443").parse().unwrap(),
+            endpoint_v6: None,
             country: country.to_owned(),
             asn,
             city: city.to_owned(),
@@ -1083,6 +1084,7 @@ mod tests {
         VerifiedEntry {
             relay_ed25519_pubkey: [tag; 32],
             endpoint: format!("198.51.100.{tag}:443").parse().unwrap(),
+            endpoint_v6: None,
             country: country.to_owned(),
             asn,
             city: city.to_owned(),
