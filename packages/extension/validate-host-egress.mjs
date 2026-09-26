@@ -4,7 +4,8 @@
 // JSON protocol, and proves the whole extension datapath: hello handshake,
 // exits listing, account lookup, connect (real multi-hop tunnel to an exit),
 // a real egress through the SOCKS5 listener the host opened, authenticated with
-// the credentials the connect answer carried, then a clean disconnect. The
+// the credentials the connect answer carried, the exit both the connect and the
+// status answers name (its country only is printed), then a clean disconnect. The
 // mnemonic is passed in the connect frame (as the extension vault would) and
 // never stored.
 //
@@ -164,6 +165,15 @@ try {
     '| states:',
     events.join(' -> '),
   );
+
+  // The exit the tunnel lands on, named by both answers. Only the country is
+  // printed: it is what the extension shows, and the city adds nothing here.
+  const isCountry = (exit) => typeof exit?.country === 'string' && /^[A-Z]{2}$/.test(exit.country);
+  if (!isCountry(connect.exit)) fail('the connect answer named no exit country');
+  if (!isCountry(status.exit)) fail('the status answer named no exit country');
+  if (status.exit.country !== connect.exit.country)
+    fail('the connect and status answers named different exits');
+  console.log('exit ok         : connect and status name the exit in', connect.exit.country);
 
   // Real egress: a CONNECT to 1.1.1.1:443 relayed to a SYN-ACK proves the
   // sealed multi-hop tunnel carries internet traffic at the exit.

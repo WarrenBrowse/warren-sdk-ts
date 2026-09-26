@@ -8,10 +8,10 @@ import {
   seedFromMnemonic,
   verifySignedRelayList,
 } from '@warrenbrowse/sdk-core';
-import { ProxyTunnel, proxyDatapathStatus } from '@warrenbrowse/sdk-node';
+import { ProxyTunnel, type ProxyTunnelOptions, proxyDatapathStatus } from '@warrenbrowse/sdk-node';
 import type { HostRequest } from '../protocol.js';
 import { NativeFrameDecoder, encodeNativeFrame } from './framing.js';
-import { HostSession } from './session.js';
+import { HostSession, type HostTunnelFactory } from './session.js';
 
 /**
  * Configuration of the native host process. The host is identity-less: the
@@ -57,6 +57,31 @@ export async function resolveServerPin(config: NativeHostConfig, apiBase: string
   if (config.serverPubkeyPin) return config.serverPubkeyPin;
   const client = new WarrenApiClient({ baseUrl: apiBase });
   return verifySignedRelayList(await client.exits()).serverPubkeyHex;
+}
+
+/**
+ * Builds the host's tunnels on the in-process engine (`ProxyTunnel`), whose
+ * connect names the exit the tunnel lands on for the session to report.
+ * `nativeFactory` replaces the addon at its boundary, for tests.
+ */
+export function hostTunnelFactory(
+  config: NativeHostConfig,
+  nativeFactory?: ProxyTunnelOptions['nativeFactory'],
+): HostTunnelFactory {
+  return async (mnemonic, onState, init) => {
+    const apiBase = hostApiBase(config, init?.channel);
+    const serverPubkeyPin = await resolveServerPin(config, apiBase);
+    return ProxyTunnel.create({
+      mnemonic,
+      apiBase,
+      serverPubkeyPin,
+      ...(init?.daita !== undefined ? { daita: init.daita } : {}),
+      ...(config.multihopRootPinHex ? { multihopRootPinHex: config.multihopRootPinHex } : {}),
+      ...(config.stateDir ? { stateDir: config.stateDir } : {}),
+      ...(nativeFactory ? { nativeFactory } : {}),
+      onState: (state) => onState(state),
+    });
+  };
 }
 
 /**
@@ -121,19 +146,7 @@ export function runNativeHost(config: NativeHostConfig): Promise<void> {
         client.dispose();
       }
     },
-    createTunnel: async (mnemonic, onState, init) => {
-      const apiBase = hostApiBase(config, init?.channel);
-      const serverPubkeyPin = await resolveServerPin(config, apiBase);
-      return ProxyTunnel.create({
-        mnemonic,
-        apiBase,
-        serverPubkeyPin,
-        ...(init?.daita !== undefined ? { daita: init.daita } : {}),
-        ...(config.multihopRootPinHex ? { multihopRootPinHex: config.multihopRootPinHex } : {}),
-        ...(config.stateDir ? { stateDir: config.stateDir } : {}),
-        onState: (state) => onState(state),
-      });
-    },
+    createTunnel: hostTunnelFactory(config),
     datapathStatus: proxyDatapathStatus,
     send: (message) => process.stdout.write(encodeNativeFrame(message)),
   });

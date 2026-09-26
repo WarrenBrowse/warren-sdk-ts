@@ -281,6 +281,17 @@ the Node launcher (`scripts/warren-host-launcher.sh`, which reads
 or gecko ids) pins which extension may drive it, and `WARREN_STATE_DIR`
 persists its anti-rollback floors.
 
+`validate-host-egress.mjs` drives the Node host over real native-messaging
+framing: `hello`, `exits`, `account`, `connect` and `status` (both must name the
+same exit country, which it prints), an authenticated SOCKS5 CONNECT through the
+tunnel, then `disconnect`. It reaches the build's channel API unless
+`WARREN_API_BASE` names another, so point it at whichever channel is live:
+
+```bash
+WARREN_API_BASE=https://api.beta.warrenbrowse.com \
+  WARREN_MNEMONIC="<subscribed 12 words>" node validate-host-egress.mjs
+```
+
 ## Protocol
 
 Version-3 JSON messages over native messaging (Chrome frames them; the host
@@ -304,8 +315,9 @@ city of the exit the tunnel lands on, as the verified relay list names them.
 With an entry selector it is still the exit, never the entry. The field is
 additive within version 3: an older extension ignores it, and
 `WarrenBrowserVpn.exitLocation()` returns `undefined` when a host does not name
-it (the Node host's napi tunnel does not report its exit today), with no live
-tunnel, and once the host is gone. `status()` relays it as well.
+it (an older host, or the Node host on an addon built before the exit crossed
+the napi boundary), with no live tunnel, and once the host is gone. `status()`
+relays it as well.
 
 ## EdgeConnect (browser WebTransport tier)
 
