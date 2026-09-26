@@ -5,7 +5,8 @@
 # (Windows Server 2022, x64, VS 2022 17.14, Git, Python 3.9, Node 20.12) with
 # no Rust and no pnpm, so both are installed here.
 #
-# codemagic.yaml caches downloads only: rustup's toolchains, ~/.cargo/bin,
+# codemagic.yaml caches downloads only, for the addon and helper workflows
+# (windows-js has none, it did not pay): rustup's toolchains, ~/.cargo/bin,
 # cargo's registry and git sources, the Node release in use, corepack's pnpm
 # and the pnpm store. A shipped addon or helper always compiles from a clean
 # target/. `scripts/codemagic-cache.sh clear warren-sdk-ts` in the workspace

@@ -28,11 +28,8 @@ definitions:
   # Downloads only, never a compiled tree (scripts/ci/codemagic/windows-env.sh
   # says what). One cache per workflow, kept 14 days;
   # `scripts/codemagic-cache.sh clear warren-sdk-ts` in the workspace empties it.
-  node_cache: &node_cache
-    cache_paths:
-      - ~/cm-tools
-      - ~/cm-pnpm-store
-      - ~/AppData/Local/node/corepack
+  # windows-js carries none: restoring it took longer than the downloads it
+  # saved (2.6 min a build with it, 2.1 without, measured 2026-09-26).
   rust_node_cache: &rust_node_cache
     cache_paths:
       - ~/cm-tools
@@ -62,7 +59,6 @@ workflows:
       vars:
         CM_RECURSIVE_SUBMODULE_INIT: "false"
         WARREN_SHA: ${{ inputs.sha }}
-    cache: *node_cache
     pre_clone_scripts: *pre_clone
     scripts:
       - *checkout
