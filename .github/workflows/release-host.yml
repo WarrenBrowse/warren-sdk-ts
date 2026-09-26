@@ -162,7 +162,7 @@ jobs:
           # Native x86_64 under Rosetta: static musl needs an x86_64 musl C
           # toolchain for ring, which only this pool's image carries.
           - lane: linux-x86_64
-            runner: [self-hosted, Linux, X64, macstudio-rosetta]
+            runner: [self-hosted, Linux, X64, libra]
             target: x86_64-unknown-linux-musl
             extra_target: ''
             wedge_timeout: 70m

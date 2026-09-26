@@ -1,7 +1,7 @@
 name: CI
 
 # Runs on the WarrenBrowse org self-hosted runners, like the sibling SDKs:
-#   [self-hosted, Linux, X64]   -> warren-docker-ci
+#   [self-hosted, Linux, X64, libra] -> the libra x86_64 Linux pool
 #   [self-hosted, macOS, ARM64] -> axiomStudio
 #   [self-hosted, Windows, macstudio-win] -> Windows-ARM VM on the Mac Studio
 # Do not switch to a GitHub-hosted runner.
@@ -48,7 +48,7 @@ jobs:
       matrix:
         include:
           - name: linux
-            runner: [self-hosted, Linux, X64]
+            runner: [self-hosted, Linux, X64, libra]
           - name: macos
             runner: [self-hosted, macOS, ARM64]
           - name: windows
@@ -116,7 +116,7 @@ jobs:
     # Self-hosted runners must never execute fork code: only same-repo events
     # reach this job.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, libra]
     steps:
       # Self-hosted runners reuse the workspace; force a clean clone so a stray
       # nested checkout or a stale auth placeholder from a prior run cannot break

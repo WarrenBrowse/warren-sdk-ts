@@ -38,7 +38,7 @@ jobs:
           # The plain [Linux, X64] docker runner is JS-only (no rustup); the
           # rosetta runner is the one the engine CI compiles Rust on.
           - name: linux-x64
-            runner: [self-hosted, Linux, X64, macstudio-rosetta]
+            runner: [self-hosted, Linux, X64, libra]
             target: x86_64-unknown-linux-gnu
           - name: darwin-arm64
             runner: [self-hosted, macOS, ARM64]
