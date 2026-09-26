@@ -205,6 +205,29 @@ pub struct ConnectEndpoints {
     pub username: String,
     /// The password clients present.
     pub password: String,
+    /// The exit the tunnel lands on. With an entry selector this is still the
+    /// circuit's exit, never the entry it enters by. Absent on the failover
+    /// datapath, where the exit rotates among the candidates.
+    pub exit: Option<TunnelExit>,
+}
+
+/// Where a tunnel's traffic leaves the Warren fleet, as the relay list names it.
+#[napi(object)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TunnelExit {
+    /// ISO 3166-1 alpha-2 country code, upper-case.
+    pub country: String,
+    /// City name.
+    pub city: String,
+}
+
+/// Names `exit` as `connect()` reports it: its country code upper-cased, and
+/// its city.
+fn tunnel_exit(exit: &VerifiedExit) -> TunnelExit {
+    TunnelExit {
+        country: exit.country.to_ascii_uppercase(),
+        city: exit.city.clone(),
+    }
 }
 
 /// A point-in-time snapshot of the multihop session counters. Only available
@@ -332,15 +355,6 @@ impl ProxySession {
         }
     }
 
-    fn endpoints(&self) -> ConnectEndpoints {
-        ConnectEndpoints {
-            socks5: self.socks5_addr().to_string(),
-            http: self.http_addr().map(|a| a.to_string()),
-            username: self.credentials().username().to_owned(),
-            password: self.credentials().password().to_owned(),
-        }
-    }
-
     fn metrics(&self) -> Option<MetricsSnapshot> {
         match self {
             Self::Plain(h) => h.metrics().map(Into::into),
@@ -425,9 +439,22 @@ type StateFn = ThreadsafeFunction<String, ErrorStrategy::Fatal>;
 struct ConnectedSession {
     proxy: ProxySession,
     state_forwarder: Option<tokio::task::JoinHandle<()>>,
+    /// The exit the session was built to, `None` on the failover datapath.
+    exit: Option<TunnelExit>,
 }
 
 impl ConnectedSession {
+    fn endpoints(&self) -> ConnectEndpoints {
+        let credentials = self.proxy.credentials();
+        ConnectEndpoints {
+            socks5: self.proxy.socks5_addr().to_string(),
+            http: self.proxy.http_addr().map(|a| a.to_string()),
+            username: credentials.username().to_owned(),
+            password: credentials.password().to_owned(),
+            exit: self.exit.clone(),
+        }
+    }
+
     fn shutdown(self) {
         if let Some(task) = self.state_forwarder {
             task.abort();
@@ -629,7 +656,7 @@ impl WarrenProxy {
 
         match self
             .slot
-            .finish_connect(result, |session| session.proxy.endpoints())
+            .finish_connect(result, ConnectedSession::endpoints)
             .await
         {
             FinishConnect::Stored(endpoints) => Ok(endpoints),
@@ -807,8 +834,12 @@ impl WarrenProxy {
         };
 
         let failover = options.failover_exit_pubkey_hexes.unwrap_or_default();
+        let mut landing = None;
         let proxy = if failover.is_empty() {
             let mut exit = self.resolve_single_exit(options.selector).await?;
+            // Named before an entry selector recomposes the circuit: what the
+            // caller shows is where traffic leaves, never the hop it enters by.
+            landing = Some(tunnel_exit(&exit));
             if let Some(entry_query) = options.entry_selector {
                 let (entries, policy) = self.fetch_cross_checked_entries().await?;
                 // Best-effort advisory: absent or garbage keeps the
@@ -862,6 +893,7 @@ impl WarrenProxy {
         Ok(ConnectedSession {
             proxy,
             state_forwarder,
+            exit: landing,
         })
     }
 
@@ -1207,6 +1239,36 @@ mod tests {
             dialed.endpoint, heavy_second.endpoint,
             "the heavier entry must win regardless of list position"
         );
+    }
+
+    #[test]
+    fn names_the_exit_by_its_upper_case_country_and_its_city() {
+        assert_eq!(
+            tunnel_exit(&exit(1, "ro", "Bucharest")),
+            TunnelExit {
+                country: "RO".to_owned(),
+                city: "Bucharest".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn an_entry_selected_circuit_is_named_by_its_exit_never_its_entry() {
+        let exit = exit(1, "DE", "Kassel");
+        let entries = vec![entry(2, "NL", "Amsterdam")];
+        let dialed = compose_circuit(
+            &test_client(),
+            &exit,
+            &entries,
+            &policy_of(&entries),
+            &EntryQuery::default(),
+            None,
+        )
+        .expect("the NL entry composes");
+        assert_eq!(dialed.endpoint, entries[0].endpoint, "dials the NL entry");
+        let named = tunnel_exit(&dialed);
+        assert_eq!(named.country, "DE");
+        assert_eq!(named.city, "Kassel");
     }
 
     #[test]

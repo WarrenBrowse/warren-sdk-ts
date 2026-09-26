@@ -99,6 +99,21 @@ export interface ConnectEndpoints {
   username: string;
   /** The password clients present. */
   password: string;
+  /**
+   * The exit the tunnel lands on. With an entry selector this is still the
+   * circuit's exit, never the entry it enters by. Absent on the failover
+   * datapath (`failoverExitPubkeyHexes`), where the exit rotates, and from an
+   * addon that predates it.
+   */
+  exit?: TunnelExit;
+}
+
+/** Where a tunnel's traffic leaves the Warren fleet, as the relay list names it. */
+export interface TunnelExit {
+  /** ISO 3166-1 alpha-2 country code, upper-case. */
+  country: string;
+  /** City name. */
+  city: string;
 }
 
 /**

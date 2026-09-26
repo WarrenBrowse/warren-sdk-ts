@@ -113,6 +113,37 @@ export interface ProxyEndpoints {
   username: string;
   /** The password clients present. */
   password: string;
+  /**
+   * The exit the tunnel lands on. With an entry selector this is still the
+   * circuit's exit, never the entry it enters by. Absent on the failover
+   * datapath, where the exit rotates, and from an addon that predates it.
+   */
+  exit?: ProxyTunnelExit;
+}
+
+/** Where a tunnel's traffic leaves the Warren fleet, as the relay list names it. */
+export interface ProxyTunnelExit {
+  /** ISO 3166-1 alpha-2 country code, upper-case. */
+  country: string;
+  /** City name. */
+  city: string;
+}
+
+/**
+ * The endpoints as the addon hands them over: napi turns an absent optional
+ * into `null`.
+ */
+export type NativeProxyEndpoints = Omit<ProxyEndpoints, 'exit'> & {
+  exit?: ProxyTunnelExit | null;
+};
+
+/** Reads the addon's exit, or `undefined` when it names none or a malformed one. */
+function tunnelExit(value: unknown): ProxyTunnelExit | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const { country, city } = value as Record<string, unknown>;
+  if (typeof country !== 'string' || !/^[A-Za-z]{2}$/.test(country)) return undefined;
+  if (typeof city !== 'string') return undefined;
+  return { country: country.toUpperCase(), city };
 }
 
 /** A point-in-time snapshot of the tunnel counters (one-shot datapath only). */
@@ -219,7 +250,7 @@ export interface NativeForwardedPort {
 export interface NativeWarrenProxy {
   readonly address: string;
   onState(callback: ((state: string) => void) | null): void;
-  connect(options?: object | null): Promise<ProxyEndpoints>;
+  connect(options?: object | null): Promise<NativeProxyEndpoints>;
   shutdown(): Promise<void>;
   metrics(): Promise<ProxyMetrics | null>;
   fatalCause(): Promise<ProxyFatalCause | null>;
@@ -403,11 +434,15 @@ export class ProxyTunnel {
 
   /** Brings up the tunnel and the local proxy listener(s); resolves with their endpoints and credentials. */
   async connect(options?: ProxyConnectOptions): Promise<ProxyEndpoints> {
+    let reported: NativeProxyEndpoints;
     try {
-      return await this.native.connect(options ?? null);
+      reported = await this.native.connect(options ?? null);
     } catch (cause) {
       throw mapNativeError(cause);
     }
+    const { exit: reportedExit, ...endpoints } = reported;
+    const exit = tunnelExit(reportedExit);
+    return exit ? { ...endpoints, exit } : endpoints;
   }
 
   /** Tears the tunnel down (fail-closed). Idempotent. */

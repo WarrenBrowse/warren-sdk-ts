@@ -17,8 +17,13 @@ binds the Warren Rust engine (`warren-sdk`) and is consumed through the
 
 `connect()` verifies the signed relay list and multi-hop directory, cross-checks
 the chosen exit, brings up a real multihop tunnel and a local SOCKS5 proxy, and
-returns its listen address. This is the non-root proxy mode (no TUN, no
-privilege). For the system-VPN mode the SDK drives the privileged `warrend`
+returns its listen address (plus the HTTP one when requested), the per-session
+credentials the listeners demand, and `exit`, the `{country, city}` the tunnel
+lands on (country upper-case). With an entry selector `exit` is still the
+circuit's exit, never the entry; it is absent on the failover datapath
+(`failoverExitPubkeyHexes`), where the exit rotates. `ProxyTunnel.connect()`
+relays it, and an addon built before it simply omits it, so `BINDING_ABI` did
+not move. This is the non-root proxy mode (no TUN, no privilege). For the system-VPN mode the SDK drives the privileged `warrend`
 daemon instead (`../src/warrend`).
 
 ## Build (local)

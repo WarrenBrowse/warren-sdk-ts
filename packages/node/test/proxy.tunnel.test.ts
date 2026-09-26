@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   NATIVE_BINDING_ABI,
+  type NativeProxyEndpoints,
   type NativeWarrenProxy,
   type ProxyFatalCause,
   type ProxyMetrics,
@@ -93,7 +94,7 @@ class ScriptedNative implements NativeWarrenProxy {
   emit(state: string): void {
     this.stateCb?.(state);
   }
-  async connect(): Promise<{ socks5: string; username: string; password: string }> {
+  async connect(): Promise<NativeProxyEndpoints> {
     return { socks5: '127.0.0.1:0', username: 'warren', password: 'x' };
   }
   async shutdown(): Promise<void> {}
@@ -153,6 +154,51 @@ describe('ProxyTunnel fatal-cause surface (A4)', () => {
 
     expect(await wouldReconnectAfterFailure('NotAuthorized')).toBe(false);
     expect(await wouldReconnectAfterFailure(null)).toBe(true);
+  });
+});
+
+/** A native binding whose connect reports `reported`, as the addon hands it over. */
+function tunnelReporting(reported: NativeProxyEndpoints): ProxyTunnel {
+  const native = new ScriptedNative(null);
+  native.connect = async () => reported;
+  return ProxyTunnel.create({
+    mnemonic: 'x',
+    apiBase: 'x',
+    serverPubkeyPin: 'x',
+    nativeFactory: () => native,
+  });
+}
+
+describe('ProxyTunnel connect result', () => {
+  const listeners = { socks5: '127.0.0.1:1080', username: 'warren', password: 'secret' };
+
+  it('relays the exit the engine names alongside the listeners', async () => {
+    const tunnel = tunnelReporting({
+      ...listeners,
+      exit: { country: 'RO', city: 'Bucharest' },
+    });
+    expect(await tunnel.connect()).toEqual({
+      ...listeners,
+      exit: { country: 'RO', city: 'Bucharest' },
+    });
+  });
+
+  it('reports no exit when the engine names none, as on the failover datapath', async () => {
+    // napi hands a missing optional over as null, and an older addon omits
+    // the field: neither may surface as an exit.
+    for (const exit of [null, undefined]) {
+      const endpoints = await tunnelReporting({ ...listeners, exit }).connect();
+      expect(endpoints).toEqual(listeners);
+      expect('exit' in endpoints).toBe(false);
+    }
+  });
+
+  it('drops an exit without a two-letter country instead of relaying it', async () => {
+    const endpoints = await tunnelReporting({
+      ...listeners,
+      exit: { country: '', city: 'Bucharest' },
+    }).connect();
+    expect('exit' in endpoints).toBe(false);
   });
 });
 
