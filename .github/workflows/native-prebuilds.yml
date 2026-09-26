@@ -163,7 +163,7 @@ jobs:
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
-      - uses: WarrenBrowse/warren-app/.github/actions/codemagic-build@13b7f019c1eba7c6b0702ce2416defc994b39229
+      - uses: ./.github/actions/codemagic-build
         with:
           app-id: ${{ vars.CODEMAGIC_APP_ID }}
           workflow: napi-windows
