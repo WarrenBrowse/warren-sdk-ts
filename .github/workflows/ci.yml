@@ -3,13 +3,14 @@ name: CI
 # Runs on the WarrenBrowse org self-hosted runners, like the sibling SDKs:
 #   [self-hosted, Linux, X64, libra] -> the libra x86_64 Linux pool
 #   [self-hosted, macOS, ARM64] -> axiomStudio
-#   [self-hosted, Windows, macstudio-win] -> Windows-ARM VM on the Mac Studio
-# Do not switch to a GitHub-hosted runner.
+# Do not switch to a GitHub-hosted runner, with one exception: the Windows leg
+# (`js-windows`) runs on a Codemagic windows_x2 machine (codemagic.yaml), and
+# its GitHub job only drives that build through the API, so it runs on a
+# GitHub-hosted runner.
 #
 # The golden vectors are a private submodule (warren-vectors), fetched over HTTPS
 # with VECTORS_TOKEN. HTTPS (not an SSH deploy key) because the runner fleet is
-# heterogeneous: the Linux docker runner has no `ssh`, and Windows fails the SSH
-# key-permission setup. VECTORS_TOKEN should be a dedicated fine-grained PAT with
+# heterogeneous: the Linux docker runner has no `ssh`. VECTORS_TOKEN should be a dedicated fine-grained PAT with
 # contents:read on warren-vectors (those cannot be minted via the API, so this is
 # a one-time manual setup).
 #
@@ -51,8 +52,6 @@ jobs:
             runner: [self-hosted, Linux, X64, libra]
           - name: macos
             runner: [self-hosted, macOS, ARM64]
-          - name: windows
-            runner: [self-hosted, Windows, macstudio-win]
     steps:
       # Self-hosted runners reuse the workspace; force a clean clone so a stray
       # nested checkout or a stale auth placeholder from a prior run cannot break
@@ -70,6 +69,12 @@ jobs:
           rm -rf .git vectors 2>/dev/null || true
           rm -rf "$RUNNER_TEMP/setup-pnpm" 2>/dev/null || true
       - uses: actions/checkout@v4
+      # The guard every Codemagic step runs under, and the check that no step
+      # of codemagic.yaml escapes it. Shell only, so the Linux leg carries it.
+      - name: Codemagic step watchdog tests
+        if: matrix.name == 'linux'
+        shell: bash
+        run: bash scripts/ci/codemagic/test-watchdog.sh
       - name: Fetch the golden-vectors submodule
         shell: bash
         env:
@@ -110,6 +115,22 @@ jobs:
           node --check packages/extension/example/background.js
           node --check packages/extension/example/popup.js
           node -e "JSON.parse(require('node:fs').readFileSync('packages/extension/example/manifest.json','utf8'))"
+
+  js-windows:
+    name: js (windows)
+    # A fork's run gets no Codemagic token: only same-repo events reach this job.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    # Same commands as the js legs (scripts/ci/codemagic/windows-js.sh), on a
+    # Codemagic windows_x2 machine. This job starts the build, replays its logs
+    # and carries its verdict; it runs no code from the repo.
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: WarrenBrowse/warren-app/.github/actions/codemagic-build@13b7f019c1eba7c6b0702ce2416defc994b39229
+        with:
+          app-id: ${{ vars.CODEMAGIC_APP_ID }}
+          workflow: windows-js
+          token: ${{ secrets.CODEMAGIC_API_TOKEN }}
 
   coverage:
     name: coverage

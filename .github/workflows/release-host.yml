@@ -147,9 +147,7 @@ jobs:
     name: Build ${{ matrix.lane }}
     needs: resolve
     runs-on: ${{ matrix.runner }}
-    # The Windows guest is shared with every other repo's Windows jobs, and a
-    # cold engine build under that load has taken most of an hour.
-    timeout-minutes: ${{ matrix.lane == 'windows-x86_64' && 120 || 90 }}
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
@@ -171,11 +169,6 @@ jobs:
             target: aarch64-unknown-linux-musl
             extra_target: ''
             wedge_timeout: 70m
-          - lane: windows-x86_64
-            runner: [self-hosted, Windows, macstudio-win]
-            target: x86_64-pc-windows-msvc
-            extra_target: ''
-            wedge_timeout: ''
     steps:
       - name: Reset stale workspace
         shell: bash
@@ -220,19 +213,14 @@ jobs:
           # Target-scoped, so inert on every other lane.
           CC_x86_64_unknown_linux_musl: musl-gcc
           CC_aarch64_unknown_linux_musl: musl-gcc
-          # No MSVC runtime DLL to install: the downloaded .exe runs as is.
-          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: -C target-feature=+crt-static
         run: |
           set -euo pipefail
-          if [ "$LANE" != windows-x86_64 ]; then
-            # Persistent cache outside _work, one per target (the runner GC
-            # wipes leaf target/ dirs in _work). Tag runs keep their own: a dry
-            # run can be dispatched from any branch, and what it compiles must
-            # never be reused by a release. On Windows a bash-shaped $HOME
-            # reaches cargo as a path it cannot resolve.
-            kind=dry; [ "$EVENT" = push ] && kind=release
-            export CARGO_TARGET_DIR="$HOME/warren-host-target-$kind-$TARGET"
-          fi
+          # Persistent cache outside _work, one per target (the runner GC
+          # wipes leaf target/ dirs in _work). Tag runs keep their own: a dry
+          # run can be dispatched from any branch, and what it compiles must
+          # never be reused by a release.
+          kind=dry; [ "$EVENT" = push ] && kind=release
+          export CARGO_TARGET_DIR="$HOME/warren-host-target-$kind-$TARGET"
           # A wedged cargo under emulation prints nothing and waits forever;
           # only `timeout` ends it (GNU coreutils: Linux lanes only).
           cargo_ci() {
@@ -242,8 +230,7 @@ jobs:
               "$@" || { echo "::warning::retrying once: $*"; sleep 15; "$@"; }
             fi
           }
-          exe=""; [ "$LANE" = windows-x86_64 ] && exe=".exe"
-          bin() { echo "${CARGO_TARGET_DIR:-target}/$1/release/warren-host$exe"; }
+          bin() { echo "${CARGO_TARGET_DIR:-target}/$1/release/warren-host"; }
           rm -f "$(bin "$TARGET")"
           cargo_ci cargo test --locked --release --target "$TARGET"
           cargo_ci cargo build --locked --release --target "$TARGET"
@@ -273,7 +260,6 @@ jobs:
               ;;
             linux-x86_64) cp "$main" "$out/warren-host-linux-x86_64" ;;
             linux-aarch64) cp "$main" "$out/warren-host-linux-aarch64" ;;
-            windows-x86_64) cp "$main" "$out/Warren-Helper-Setup.exe" ;;
           esac
           ls -l "$out"
       - uses: actions/setup-node@v4
@@ -292,9 +278,43 @@ jobs:
             node sdk-ts/scripts/release-host.mjs upload "$RELEASE_ID" "$file"
           done
 
+  build-windows:
+    name: Build windows-x86_64
+    needs: resolve
+    # Tested, built and checked on a Codemagic windows_x2 machine (codemagic.yaml
+    # `host-windows`, scripts/ci/codemagic/host-windows.sh), static CRT, the
+    # binary made to name its release and channel; this job starts the build,
+    # receives the verified Warren-Helper-Setup.exe and uploads it to the draft.
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: sdk-ts
+          persist-credentials: false
+      - uses: WarrenBrowse/warren-app/.github/actions/codemagic-build@13b7f019c1eba7c6b0702ce2416defc994b39229
+        with:
+          app-id: ${{ vars.CODEMAGIC_APP_ID }}
+          workflow: host-windows
+          token: ${{ secrets.CODEMAGIC_API_TOKEN }}
+          out-dir: out
+          inputs: |
+            channel=${{ needs.resolve.outputs.channel }}
+            version=${{ needs.resolve.outputs.version }}
+      - uses: actions/setup-node@v4
+        if: needs.resolve.outputs.publish == 'true'
+        with:
+          node-version: 20
+      - name: Upload to the draft release
+        if: needs.resolve.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_ID: ${{ needs.resolve.outputs.release_id }}
+        run: node sdk-ts/scripts/release-host.mjs upload "$RELEASE_ID" out/Warren-Helper-Setup.exe
+
   publish:
     name: Installers, checksums and publish
-    needs: [resolve, build]
+    needs: [resolve, build, build-windows]
     if: needs.resolve.outputs.publish == 'true'
     # The native pool: bulk transfers from the container pools crawl.
     runs-on: [self-hosted, macOS, ARM64]

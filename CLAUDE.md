@@ -78,6 +78,11 @@ to the private engine); build it locally per `packages/node/native/README.md`.
 Datapath features are additionally validated against a real exit / the real
 daemon: `CONTRIBUTING.md`, "Live validations".
 
+Every Windows leg (ci.yml `js-windows`, native-prebuilds.yml `addon-windows`,
+release-host.yml `build-windows`) builds on Codemagic from `codemagic.yaml` and
+`scripts/ci/codemagic/`, started through warren-app's proxy action pinned by
+SHA: the `warren-codemagic` skill.
+
 ## Downstream consumer
 
 `warren-extension` consumes these packages via `link:../warren-sdk-ts/packages/*`

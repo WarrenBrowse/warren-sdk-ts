@@ -43,9 +43,6 @@ jobs:
           - name: darwin-arm64
             runner: [self-hosted, macOS, ARM64]
             target: aarch64-apple-darwin
-          - name: win32-x64
-            runner: [self-hosted, Windows, macstudio-win]
-            target: x86_64-pc-windows-msvc
     steps:
       - name: Reset stale workspace
         shell: bash
@@ -144,9 +141,9 @@ jobs:
             mv "$src" "warren-napi.${{ matrix.name }}.node"
           fi
           ls -la warren-napi.${{ matrix.name }}.node
-      # Node-based publish: the Windows runner has no gh CLI, and Actions
-      # artifacts are unusable (org storage quota). (The wclaude launcher moved
-      # to its own repo WarrenBrowse/wclaude with its own build workflow.)
+      # Node-based publish: Actions artifacts are unusable (org storage quota).
+      # (The wclaude launcher moved to its own repo WarrenBrowse/wclaude with
+      # its own build workflow.)
       - name: Publish to the rolling release
         shell: bash
         working-directory: sdk-ts
@@ -155,3 +152,27 @@ jobs:
         run: |
           node scripts/publish-prebuild.mjs native-prebuilds \
             "packages/node/native/warren-napi/warren-napi.${{ matrix.name }}.node"
+
+  addon-windows:
+    name: addon (win32-x64)
+    # Built on a Codemagic windows_x2 machine (codemagic.yaml `napi-windows`,
+    # scripts/ci/codemagic/napi-windows.sh) against the same pinned engine as
+    # the matrix legs; this job starts the build, receives the verified addon
+    # and publishes it like the others.
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: WarrenBrowse/warren-app/.github/actions/codemagic-build@13b7f019c1eba7c6b0702ce2416defc994b39229
+        with:
+          app-id: ${{ vars.CODEMAGIC_APP_ID }}
+          workflow: napi-windows
+          token: ${{ secrets.CODEMAGIC_API_TOKEN }}
+          out-dir: out
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Publish to the rolling release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/publish-prebuild.mjs native-prebuilds out/warren-napi.win32-x64.node
