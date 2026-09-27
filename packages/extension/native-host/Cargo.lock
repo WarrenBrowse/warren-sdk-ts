@@ -3118,6 +3118,7 @@ dependencies = [
  "rustls",
  "thiserror",
  "tokio",
+ "tracing",
  "warren-daita",
  "warren-multihop",
  "warren-quinn",
