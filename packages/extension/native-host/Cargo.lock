@@ -2916,6 +2916,7 @@ dependencies = [
  "warren-contract",
  "warren-discovery-core",
  "warren-identity",
+ "warrenguard-multihop",
  "warrenguard-token",
  "zeroize",
 ]
@@ -3032,8 +3033,8 @@ dependencies = [
 
 [[package]]
 name = "warren-quinn"
-version = "0.11.11-fork.13"
-source = "git+https://github.com/WarrenBrowse/warren-quinn.git?tag=v0.11.17-fork.13#3bea597a52758b87bb55aa8f568c545cf344663c"
+version = "0.11.11-fork.14"
+source = "git+https://github.com/WarrenBrowse/warren-quinn.git?tag=v0.11.17-fork.14#5cc3213aca2ece13450de3bf8eb34cf3e9856d96"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -3051,8 +3052,8 @@ dependencies = [
 
 [[package]]
 name = "warren-quinn-proto"
-version = "0.11.17-fork.13"
-source = "git+https://github.com/WarrenBrowse/warren-quinn.git?tag=v0.11.17-fork.13#3bea597a52758b87bb55aa8f568c545cf344663c"
+version = "0.11.17-fork.14"
+source = "git+https://github.com/WarrenBrowse/warren-quinn.git?tag=v0.11.17-fork.14#5cc3213aca2ece13450de3bf8eb34cf3e9856d96"
 dependencies = [
  "bytes",
  "fastbloom",
@@ -3074,8 +3075,8 @@ dependencies = [
 
 [[package]]
 name = "warren-quinn-udp"
-version = "0.6.1-fork.13"
-source = "git+https://github.com/WarrenBrowse/warren-quinn.git?tag=v0.11.17-fork.13#3bea597a52758b87bb55aa8f568c545cf344663c"
+version = "0.6.1-fork.14"
+source = "git+https://github.com/WarrenBrowse/warren-quinn.git?tag=v0.11.17-fork.14#5cc3213aca2ece13450de3bf8eb34cf3e9856d96"
 dependencies = [
  "cfg_aliases",
  "libc",
@@ -3083,7 +3084,7 @@ dependencies = [
  "parking_lot",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3104,6 +3105,7 @@ dependencies = [
  "warren-net",
  "warren-transport",
  "warrenguard-config",
+ "zeroize",
 ]
 
 [[package]]
