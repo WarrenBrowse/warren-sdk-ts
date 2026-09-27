@@ -151,6 +151,39 @@ describe('acquireTokens (v7 session-token acquisition flow)', () => {
     );
   });
 
+  it('sends the smaller batch first, unchanged, when the quota grows', async () => {
+    // warren-api completes an epoch slot held by a smaller batch only when the
+    // larger request starts with it byte for byte. Wallets held 3-token batches
+    // for their whole horizon when the device cap went to 5: each slot derives
+    // from the wallet, the epoch and its own index, never the batch size.
+    const base = fakeTransport();
+    const withQuota = (quota: number): { transport: TokenTransport; sent: string[][] } => {
+      const sent: string[][] = [];
+      return {
+        sent,
+        transport: {
+          async getDirectory() {
+            return { ...(await base.getDirectory()), quota_per_epoch: quota };
+          },
+          async issue(request) {
+            sent.push(request.epochs[0]?.blinded ?? []);
+            return base.issue(request);
+          },
+        },
+      };
+    };
+    const small = withQuota(3);
+    const large = withQuota(5);
+    const opts = { nowUnixSecs: EPOCH * EPOCH_SECS + 10, blindingKey: BLINDING_KEY };
+
+    await acquireTokens(small.transport, opts);
+    const grown = await acquireTokens(large.transport, opts);
+
+    expect(grown.tokens).toHaveLength(5);
+    expect(large.sent[0]).toHaveLength(5);
+    expect(large.sent[0]?.slice(0, 3)).toEqual(small.sent[0]);
+  });
+
   it('rejects an epoch the issuer refused', async () => {
     const base = fakeTransport();
     const transport: TokenTransport = {
