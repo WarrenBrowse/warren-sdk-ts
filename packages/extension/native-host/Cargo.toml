@@ -21,7 +21,7 @@ path = "src/main.rs"
 # the Node host carry one engine. Local builds and CI resolve it from a
 # checkout through the gitignored override described in
 # packages/extension/README.md ("Building the helper").
-warren-sdk = { git = "https://github.com/WarrenBrowse/warren-sdk-rs.git", rev = "e3e7f3851409a23a70bcbae8b7d80f581b53f90c" }
+warren-sdk = { git = "https://github.com/WarrenBrowse/warren-sdk-rs.git", rev = "fb8fee0e378120f5fa1d600158d45d409e8efccb" }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "signal", "sync", "time"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
