@@ -277,18 +277,29 @@ pub fn hello_answer(id: &Value) -> Value {
 }
 
 /// The `status` answer. `exit` is named while a tunnel is up and its exit is
-/// known.
+/// known. While the helper stands aside behind the Warren app's system tunnel,
+/// `via` is `"system"` and `exit` names that tunnel's exit, or is absent when
+/// unknown: the helper's own exit carries none of the traffic then. Additive,
+/// like `exit`: an older extension ignores `via`.
 #[must_use]
 pub fn status_answer(
     id: &Value,
     state: HostState,
     endpoints: Option<&Endpoints>,
-    exit: Option<&TunnelExit>,
+    own_exit: Option<&TunnelExit>,
+    route: &crate::session::TunnelRoute,
 ) -> Value {
     let mut value = json!({ "id": id, "ok": true, "type": "status", "state": state.as_str() });
     if let Some(endpoints) = endpoints {
         value["endpoints"] = endpoints.to_json();
     }
+    let exit = match route {
+        crate::session::TunnelRoute::Own => own_exit,
+        crate::session::TunnelRoute::System(system_exit) => {
+            value["via"] = json!("system");
+            system_exit.as_ref()
+        }
+    };
     if let Some(exit) = exit {
         value["exit"] = exit.to_json();
     }
@@ -456,12 +467,24 @@ mod tests {
             json!({ "id": 1, "ok": true, "type": "hello", "protocol": 3, "datapath": "ready" })
         );
         assert_eq!(
-            status_answer(&json!(2), HostState::Connected, Some(&endpoints), None),
+            status_answer(
+                &json!(2),
+                HostState::Connected,
+                Some(&endpoints),
+                None,
+                &crate::session::TunnelRoute::Own
+            ),
             json!({ "id": 2, "ok": true, "type": "status", "state": "connected",
                     "endpoints": { "socks5": "127.0.0.1:1080", "http": "127.0.0.1:8118" } })
         );
         assert_eq!(
-            status_answer(&json!(3), HostState::Disconnected, None, None),
+            status_answer(
+                &json!(3),
+                HostState::Disconnected,
+                None,
+                None,
+                &crate::session::TunnelRoute::Own
+            ),
             json!({ "id": 3, "ok": true, "type": "status", "state": "disconnected" })
         );
         assert_eq!(
@@ -502,7 +525,8 @@ mod tests {
                 &json!(6),
                 HostState::Connected,
                 Some(&endpoints),
-                Some(&exit)
+                Some(&exit),
+                &crate::session::TunnelRoute::Own
             ),
             json!({ "id": 6, "ok": true, "type": "status", "state": "connected",
                     "endpoints": { "socks5": "127.0.0.1:1080" },

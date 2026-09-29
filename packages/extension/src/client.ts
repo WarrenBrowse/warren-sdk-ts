@@ -9,6 +9,7 @@ import {
   type ExtensionExitQuery,
   type ExtensionProxyAuth,
   type ExtensionTunnelExit,
+  type ExtensionTunnelVia,
   type ExtensionVpnState,
   type HostDatapath,
   type HostRequest,
@@ -502,6 +503,9 @@ export class WarrenBrowserVpn {
   async status(): Promise<{
     state: ExtensionVpnState;
     endpoints?: ExtensionEndpoints;
+    /** `'system'` while the host stands aside behind the Warren app's system
+     * tunnel; `exit` is then that tunnel's. */
+    via?: ExtensionTunnelVia;
     exit?: ExtensionTunnelExit;
   }> {
     const res = await this.asking(() => this.request({ type: 'status' }));
@@ -512,6 +516,7 @@ export class WarrenBrowserVpn {
     return {
       state: res.state,
       ...(res.endpoints ? { endpoints: res.endpoints } : {}),
+      ...(res.via === 'system' ? { via: 'system' as const } : {}),
       ...(exit ? { exit } : {}),
     };
   }

@@ -21,6 +21,11 @@
  * selector, still the exit, never the entry). Additive in the same way: an
  * older extension ignores it, and a newer one reads its absence, or a value
  * of the wrong shape, as an unknown exit.
+ *
+ * The status answer may also carry `via: 'system'`: the host stands aside
+ * behind the Warren desktop app's system tunnel, which already carries the
+ * browser, and `exit` then names that tunnel's exit (or is absent when
+ * unknown), never the one the host had dialled. Additive in the same way.
  */
 import type { ProductChannel } from '@warrenbrowse/sdk-core';
 
@@ -69,6 +74,10 @@ export interface ExtensionExitLocation {
   city: string;
   active: boolean;
 }
+
+/** Whose tunnel carries the browser while the host reports `connected`: the
+ * Warren desktop app's system tunnel, which the host stands aside behind. */
+export type ExtensionTunnelVia = 'system';
 
 /** The exit a live tunnel lands on, as the verified relay list names it. */
 export interface ExtensionTunnelExit {
@@ -159,7 +168,10 @@ export type HostResponse =
       type: 'status';
       state: ExtensionVpnState;
       endpoints?: ExtensionEndpoints;
-      /** The live tunnel's exit; absent with no tunnel or an unknown exit. */
+      /** Set while the host stands aside behind the system tunnel. */
+      via?: ExtensionTunnelVia;
+      /** The live tunnel's exit (the system tunnel's with `via`); absent with no
+       * tunnel or an unknown exit. */
       exit?: ExtensionTunnelExit;
     }
   | {

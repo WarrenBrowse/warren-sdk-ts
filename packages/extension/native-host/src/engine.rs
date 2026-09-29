@@ -20,7 +20,8 @@ use zeroize::Zeroizing;
 
 use crate::protocol::{Endpoints, EntryQuery, ExitLocation, ExitQuery, HostState, TunnelExit};
 use crate::session::{
-    ConnectOptions, ErrorCode, HostBackend, HostError, HostTunnel, Listeners, StateSink, TunnelInit,
+    ConnectOptions, ErrorCode, HostBackend, HostError, HostTunnel, Listeners, StateSink,
+    TunnelInit, TunnelRoute,
 };
 
 type Client = WarrenClient<warren_sdk::api::ReqwestTransport>;
@@ -113,6 +114,15 @@ pub fn exit_matches(exit: &VerifiedExit, query: &ExitQuery) -> bool {
             .city
             .as_deref()
             .is_none_or(|c| exit.city.eq_ignore_ascii_case(c))
+}
+
+/// Names the system tunnel's exit as the extension shows it, when the check
+/// placed it in a country and a city.
+fn system_exit(exit: &warren_sdk::SystemExit) -> Option<TunnelExit> {
+    Some(TunnelExit {
+        country: exit.country.as_deref()?.to_ascii_uppercase(),
+        city: exit.city.clone()?,
+    })
 }
 
 /// Names `exit` as the extension shows it: the relay list's country code
@@ -406,6 +416,16 @@ impl HostTunnel for EngineTunnel {
         Ok(listeners)
     }
 
+    fn route(&self) -> TunnelRoute {
+        let Some((handle, _)) = &self.live else {
+            return TunnelRoute::Own;
+        };
+        match &*handle.watch_system_exit().borrow() {
+            Some(exit) => TunnelRoute::System(system_exit(exit)),
+            None => TunnelRoute::Own,
+        }
+    }
+
     async fn shutdown(self) {
         if let Some((handle, forwarder)) = self.live {
             // Stop reporting first: nothing may describe a tunnel that is gone.
@@ -420,6 +440,24 @@ mod tests {
     use warren_sdk::api::{HttpRequest, HttpResponse, TransportError};
 
     use super::*;
+
+    #[test]
+    fn a_system_exit_is_named_only_with_its_country_and_city() {
+        let named = system_exit(&warren_sdk::SystemExit::new(Some("fi"), Some("Helsinki")));
+        assert_eq!(
+            named,
+            Some(TunnelExit {
+                country: "FI".into(),
+                city: "Helsinki".into()
+            })
+        );
+        for partial in [
+            warren_sdk::SystemExit::new(Some("FI"), None),
+            warren_sdk::SystemExit::default(),
+        ] {
+            assert_eq!(system_exit(&partial), None, "{partial:?}");
+        }
+    }
 
     /// Circuit composition is pure: the client under test never touches HTTP.
     struct NoHttp;

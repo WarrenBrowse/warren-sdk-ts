@@ -814,6 +814,34 @@ describe('WarrenBrowserVpn events and state', () => {
   });
 });
 
+describe('WarrenBrowserVpn standing aside', () => {
+  it('reports a host standing aside behind the system tunnel, with that tunnel exit', async () => {
+    const helsinki = { country: 'FI', city: 'Helsinki' };
+    let via: unknown = 'system';
+    const { chrome } = fakeChrome((req, p) => {
+      if (req.type === 'connect') {
+        p.emit({
+          id: req.id,
+          ok: true,
+          type: 'connect',
+          endpoints: LISTENERS,
+          auth: AUTH,
+          exit: { country: 'DE', city: 'Frankfurt' },
+        });
+      } else if (req.type === 'status') {
+        p.emit({ id: req.id, ok: true, type: 'status', state: 'connected', via, exit: helsinki });
+      } else healthyHost(req, p);
+    });
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+
+    expect(await vpn.status()).toMatchObject({ via: 'system', exit: helsinki });
+
+    via = 'teleport';
+    expect((await vpn.status()).via).toBeUndefined();
+  });
+});
+
 describe('WarrenBrowserVpn exit location', () => {
   const BUCHAREST = { country: 'RO', city: 'Bucharest' };
 

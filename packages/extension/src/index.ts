@@ -34,6 +34,7 @@ export {
   type ExtensionExitQuery,
   type ExtensionProxyAuth,
   type ExtensionTunnelExit,
+  type ExtensionTunnelVia,
   type ExtensionVpnState,
   type HostDatapath,
   type HostMessage,

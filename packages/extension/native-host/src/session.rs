@@ -129,6 +129,17 @@ pub struct Listeners {
     pub exit: Option<TunnelExit>,
 }
 
+/// Whose tunnel carries the clients of a connected tunnel's listeners.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum TunnelRoute {
+    /// The helper's own tunnel, landing on the exit its connect named.
+    #[default]
+    Own,
+    /// The Warren app's system tunnel, which already carries the host: the
+    /// helper stands aside behind it. Its exit, when the check named one.
+    System(Option<TunnelExit>),
+}
+
 /// One tunnel, as the session drives it.
 pub trait HostTunnel {
     /// Dials the tunnel and opens its listeners.
@@ -139,6 +150,10 @@ pub trait HostTunnel {
     /// Tears it down. Never fails: a tunnel that cannot be told to stop still
     /// dies with the process.
     fn shutdown(self) -> impl Future<Output = ()>;
+    /// Whose tunnel carries the listeners' clients right now.
+    fn route(&self) -> TunnelRoute {
+        TunnelRoute::Own
+    }
 }
 
 /// The engine behind the session.
@@ -219,11 +234,16 @@ impl<B: HostBackend> HostSession<B> {
             Request::Hello { protocol, channel } => self.hello(&id, protocol, channel),
             Request::Status => {
                 let inner = lock(&self.inner);
+                let route = inner
+                    .tunnel
+                    .as_ref()
+                    .map_or(TunnelRoute::Own, HostTunnel::route);
                 let answer = protocol::status_answer(
                     &id,
                     inner.state,
                     inner.endpoints.as_ref(),
                     inner.exit.as_ref(),
+                    &route,
                 );
                 drop(inner);
                 self.send(answer);
@@ -441,6 +461,8 @@ mod tests {
         account_channels: Mutex<Vec<Option<Channel>>>,
         shutdowns: AtomicUsize,
         sinks: Mutex<Vec<StateSink>>,
+        /// What the fake tunnel reports carrying its clients.
+        route: Mutex<TunnelRoute>,
     }
 
     #[derive(Clone, Default)]
@@ -492,6 +514,10 @@ mod tests {
 
         async fn shutdown(self) {
             self.fake.seen.shutdowns.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn route(&self) -> TunnelRoute {
+            lock(&self.fake.seen.route).clone()
         }
     }
 
@@ -787,6 +813,49 @@ mod tests {
         assert_eq!(h.shutdowns(), 1);
         h.send(json!({ "id": 5, "type": "status" })).await;
         assert_eq!(h.last()["state"], "disconnected");
+    }
+
+    /// While the Warren app's system tunnel carries the browser, the helper
+    /// stands aside: the popup must name the app's exit, which is where the
+    /// member's traffic leaves, never the exit the helper had dialled.
+    #[tokio::test]
+    async fn status_names_the_system_exit_while_the_tunnel_stands_aside() {
+        let own = TunnelExit {
+            country: "DE".into(),
+            city: "Frankfurt".into(),
+        };
+        let h = Harness::new(Fake {
+            exit: Some(own.clone()),
+            ..Fake::default()
+        });
+        h.send(connect(1)).await;
+        *lock(&h.seen.route) = TunnelRoute::System(Some(TunnelExit {
+            country: "FI".into(),
+            city: "Helsinki".into(),
+        }));
+
+        h.send(json!({ "id": 2, "type": "status" })).await;
+        assert_eq!(h.last()["via"], "system");
+        assert_eq!(
+            h.last()["exit"],
+            json!({ "country": "FI", "city": "Helsinki" })
+        );
+
+        *lock(&h.seen.route) = TunnelRoute::System(None);
+        h.send(json!({ "id": 3, "type": "status" })).await;
+        assert_eq!(h.last()["via"], "system");
+        assert!(
+            h.last().get("exit").is_none(),
+            "an unknown system exit is not replaced by the helper's own"
+        );
+
+        *lock(&h.seen.route) = TunnelRoute::Own;
+        h.send(json!({ "id": 4, "type": "status" })).await;
+        assert!(h.last().get("via").is_none());
+        assert_eq!(
+            h.last()["exit"],
+            json!({ "country": "DE", "city": "Frankfurt" })
+        );
     }
 
     #[tokio::test]
