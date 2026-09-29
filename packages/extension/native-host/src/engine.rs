@@ -191,7 +191,11 @@ impl EngineBackend {
             .multihop_root_pubkey_pin(product::MULTIHOP_ROOT_PUBKEY_HEX)
             .generation_store(Arc::new(relay))
             .multihop_generation_store(Arc::new(multihop))
-            .server_key_store(Arc::new(server_key)))
+            .server_key_store(Arc::new(server_key))
+            // The Warren app's system tunnel walls a second tunnel to the relay
+            // the two share: stand aside while the host route exits through
+            // Warren, rather than leave the browser stalled behind a dead one.
+            .stand_aside_behind_system_warren())
     }
 }
 
