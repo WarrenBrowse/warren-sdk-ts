@@ -286,9 +286,9 @@ impl From<MapProtoJs> for MapProto {
 
 /// Why the self-healing supervisor gave up (state `"failed"` with a definitive
 /// cause), mirroring [`warren_sdk::transport::FatalCause`] across the boundary so
-/// the JS side can distinguish an unauthorized account, a device-limit rejection
-/// and an opaque policy refusal instead of collapsing them to one "tunnel failed"
-/// kind and retrying a fatal forever. The engine owns this classification; this
+/// the JS side can distinguish an unauthorized account, a device-limit rejection,
+/// an opaque policy refusal and a network that routes no entry relay instead of
+/// collapsing them to one "tunnel failed" kind and retrying a fatal forever. The engine owns this classification; this
 /// binding maps, it never re-decides.
 ///
 /// Read via [`WarrenProxy::fatal_cause`]. A `"failed"` reached by mere retry
@@ -305,6 +305,11 @@ pub enum FatalCauseJs {
     /// The exit closed with the opaque policy-rejection code and no sealed cause
     /// arrived: definitive, but the specific reason is unknown to the client.
     PolicyRefused,
+    /// No entry relay is reachable on this network's address families (an
+    /// IPv6-only network against IPv4-only entries). Neither the account nor
+    /// the fleet is at fault: the user changes network, or unpins an entry
+    /// country the network cannot reach.
+    NoReachableEntry,
 }
 
 impl From<FatalCause> for FatalCauseJs {
@@ -313,6 +318,7 @@ impl From<FatalCause> for FatalCauseJs {
             FatalCause::NotAuthorized => FatalCauseJs::NotAuthorized,
             FatalCause::DeviceLimit => FatalCauseJs::DeviceLimit,
             FatalCause::PolicyRefused => FatalCauseJs::PolicyRefused,
+            FatalCause::NoReachableEntry => FatalCauseJs::NoReachableEntry,
             // `FatalCause` is `#[non_exhaustive]`: an engine-added fatal we do not
             // yet name still crosses as a definitive refusal (never a false
             // "retryable"), matching the FFI's mapping.
@@ -1076,6 +1082,16 @@ mod tests {
         assert!(matches!(
             FatalCauseJs::from(FatalCause::PolicyRefused),
             FatalCauseJs::PolicyRefused
+        ));
+    }
+
+    #[test]
+    fn a_network_that_routes_no_entry_crosses_as_its_own_kind_not_a_policy_refusal() {
+        // Read as a policy refusal, it tells the user their account was
+        // refused when the fix is changing network.
+        assert!(matches!(
+            FatalCauseJs::from(FatalCause::NoReachableEntry),
+            FatalCauseJs::NoReachableEntry
         ));
     }
 

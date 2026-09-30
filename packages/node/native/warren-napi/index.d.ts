@@ -149,7 +149,7 @@ export type MapProtoJs = 'Tcp' | 'Udp';
  * reached by transient-retry exhaustion carries none. Read via
  * `WarrenProxy.fatalCause`.
  */
-export type FatalCauseJs = 'NotAuthorized' | 'DeviceLimit' | 'PolicyRefused';
+export type FatalCauseJs = 'NotAuthorized' | 'DeviceLimit' | 'PolicyRefused' | 'NoReachableEntry';
 
 /** A forwarded tunnel-side port (see `WarrenProxy.forwardPort`). */
 export declare class WarrenForwardedPort {

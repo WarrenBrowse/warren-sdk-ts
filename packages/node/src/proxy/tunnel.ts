@@ -177,7 +177,14 @@ export type ProxyFatalCause =
   /** The account already holds its maximum simultaneous devices. */
   | 'DeviceLimit'
   /** Opaque policy refusal: definitive, specific reason unknown to the client. */
-  | 'PolicyRefused';
+  | 'PolicyRefused'
+  /**
+   * This network routes none of the entry relays' address families (an
+   * IPv6-only network against IPv4-only entries). Neither the account nor the
+   * fleet is at fault: change network, or unpin an entry country this network
+   * cannot reach.
+   */
+  | 'NoReachableEntry';
 
 /**
  * Stable error codes carried by {@link WarrenProxyError}. The native codes
@@ -471,8 +478,9 @@ export class ProxyTunnel {
    * while still healing, on transient-retry exhaustion, or on the one-shot
    * datapath. Read it when {@link ProxyTunnelOptions.onState} reports
    * `'failed'`: a present cause means retrying is futile (expired subscription,
-   * device limit, opaque policy refusal), so a consumer must STOP its reconnect
-   * loop and tell the user instead of looping `'reconnecting'` forever.
+   * device limit, opaque policy refusal, a network that routes no entry relay),
+   * so a consumer must STOP its reconnect loop and tell the user instead of
+   * looping `'reconnecting'` forever.
    */
   async fatalCause(): Promise<ProxyFatalCause | null> {
     try {

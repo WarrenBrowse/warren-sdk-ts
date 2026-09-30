@@ -119,7 +119,12 @@ describe('ProxyTunnel fatal-cause surface (A4)', () => {
     // The A4 bug is collapsing every fatal to one "tunnel" kind so a
     // subscription rejection loops "reconnecting" forever. Each engine verdict
     // must reach the caller as its own kind, not one generic failure.
-    for (const cause of ['NotAuthorized', 'DeviceLimit', 'PolicyRefused'] as const) {
+    for (const cause of [
+      'NotAuthorized',
+      'DeviceLimit',
+      'PolicyRefused',
+      'NoReachableEntry',
+    ] as const) {
       const tunnel = ProxyTunnel.create({
         mnemonic: 'x',
         apiBase: 'x',
