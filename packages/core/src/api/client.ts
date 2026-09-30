@@ -7,6 +7,7 @@ import type {
 } from '../edge/token-acquire.js';
 import { type WarrenKeyPair, keyPairFromSeed, wipeKeyPair } from '../identity/derivation.js';
 import { signWithKeyPair, signatureHeaders } from '../identity/signing.js';
+import { SIGNATURE_WINDOW_SECS, ServerClock, clockOffsetSecs } from './clock.js';
 import type * as dto from './dto.js';
 import { WarrenApiError } from './errors.js';
 import {
@@ -39,6 +40,12 @@ export interface WarrenApiClientOptions {
   now?: () => number;
   /** Nonce source, 32 lowercase hex chars. Defaults to a CSPRNG. */
   nonce?: () => string;
+  /**
+   * The server clock signed requests are stamped with, learned from every
+   * answer's `Date`. Pass one instance to every client of a wallet so what one
+   * reads corrects them all. Defaults to a clock of this client's own.
+   */
+  serverClock?: ServerClock;
 }
 
 /** Replaces the hostname of a base URL, preserving scheme, explicit port and path. */
@@ -48,6 +55,42 @@ function replaceHost(baseUrl: string, hostname: string): string {
   // origin alone would drop a path-bearing base URL (https://x/gateway), and
   // every fallback attempt would then hit the wrong path.
   return u.origin + (u.pathname === '/' ? '' : u.pathname);
+}
+
+/**
+ * Whether a `401` refuses the request's timestamp rather than its key: the body
+ * is the contract's `{"error":"clock_skew"}`, or the answer's own `Date` puts
+ * the stamp sent outside the window. The second reading covers a server that
+ * answers a bare `401`, as warren-api did before it named the cause; the server
+ * checks the window before the signature, so such a stamp was refused for
+ * nothing else.
+ */
+function refusesTheClock(res: HttpResponse, stamp: number): boolean {
+  try {
+    const parsed: unknown = JSON.parse(res.body);
+    if (
+      typeof parsed === 'object' &&
+      parsed !== null &&
+      (parsed as { error?: unknown }).error === 'clock_skew'
+    ) {
+      return true;
+    }
+  } catch {
+    // Not JSON: fall through to the Date reading.
+  }
+  const offset = stampOffset(res, stamp);
+  return offset !== undefined && Math.abs(offset) > SIGNATURE_WINDOW_SECS;
+}
+
+/** Whether the server whose clock `res`'s `Date` shows would take `stamp`;
+ * false without a `Date`, since nothing then says a new stamp would fare better. */
+function stampFitsTheWindow(res: HttpResponse, stamp: number): boolean {
+  const offset = stampOffset(res, stamp);
+  return offset !== undefined && Math.abs(offset) <= SIGNATURE_WINDOW_SECS;
+}
+
+function stampOffset(res: HttpResponse, stamp: number): number | undefined {
+  return res.date === undefined ? undefined : clockOffsetSecs(res.date, stamp);
 }
 
 /**
@@ -65,6 +108,8 @@ export class WarrenApiClient {
   private keyPair: WarrenKeyPair | undefined;
   private readonly now: () => number;
   private readonly nonce: () => string;
+  /** The server clock signed requests are stamped with. */
+  readonly serverClock: ServerClock;
 
   constructor(options: WarrenApiClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -73,6 +118,7 @@ export class WarrenApiClient {
     this.keyPair = options.seed ? keyPairFromSeed(options.seed) : undefined;
     this.now = options.now ?? (() => Math.floor(Date.now() / 1000));
     this.nonce = options.nonce ?? randomNonceHex;
+    this.serverClock = options.serverClock ?? new ServerClock();
   }
 
   /**
@@ -281,13 +327,62 @@ export class WarrenApiClient {
     };
   }
 
+  /**
+   * Sends a request. A signed one is stamped with the server clock.
+   *
+   * The clock is learned from the `Date` of a `401` only. A refusal is the one
+   * answer never served from a cache (it has no freshness and answers this
+   * request's own signature), and the one that says the stamp needs moving.
+   * Any other answer can be a cached copy: the relay list is `public,
+   * max-age=60`, and the browser's HTTP cache hands it back with the `Date` it
+   * was first served under, which would move a right clock's stamp out of the
+   * window.
+   *
+   * A `401` that refuses the timestamp is signed again, once, when the stamp
+   * the refusal's own `Date` leads to fits the window; otherwise (a server
+   * further ahead than the forward bound, a refusal with no `Date`) it throws
+   * `clock_skew` at once. Any other `401` is returned as it came, so a bad key
+   * costs one request, not two.
+   */
   private async request(
     method: string,
     path: string,
     opts: { body?: string; signed: boolean },
   ): Promise<HttpResponse> {
     const body = opts.body ?? '';
-    const headers = this.buildHeaders(method, path, body, opts.signed);
+    const first = this.buildHeaders(method, path, body, opts.signed);
+    const res = await this.sendToFirstHostThatAnswers(method, path, body, first.headers);
+    if (!opts.signed || !this.refusedForTheClock(res, first.stamp)) return res;
+    const retry = this.buildHeaders(method, path, body, true);
+    if (!stampFitsTheWindow(res, retry.stamp)) throw this.clockSkew(res);
+    const retried = await this.sendToFirstHostThatAnswers(method, path, body, retry.headers);
+    if (this.refusedForTheClock(retried, retry.stamp)) throw this.clockSkew(retried);
+    return retried;
+  }
+
+  /** Whether `res` is a `401` refusing `stamp` for the clock, after learning
+   * the server clock from any `401`'s `Date`. */
+  private refusedForTheClock(res: HttpResponse, stamp: number): boolean {
+    if (res.status !== 401) return false;
+    if (res.date !== undefined) this.serverClock.observeDate(res.date, this.now());
+    return refusesTheClock(res, stamp);
+  }
+
+  private clockSkew(res: HttpResponse): WarrenApiError {
+    const offsetSecs = res.date === undefined ? undefined : clockOffsetSecs(res.date, this.now());
+    return new WarrenApiError(
+      'clock_skew',
+      "the server refused the request's timestamp: this device's clock is off",
+      offsetSecs === undefined ? { status: 401 } : { status: 401, offsetSecs },
+    );
+  }
+
+  private async sendToFirstHostThatAnswers(
+    method: string,
+    path: string,
+    body: string,
+    headers: Record<string, string>,
+  ): Promise<HttpResponse> {
     let lastError: unknown;
     for (const candidate of this.candidates(path)) {
       try {
@@ -319,7 +414,7 @@ export class WarrenApiClient {
     path: string,
     body: string,
     signed: boolean,
-  ): Record<string, string> {
+  ): { headers: Record<string, string>; stamp: number } {
     const headers: Record<string, string> = {
       accept: 'application/json',
       'user-agent': USER_AGENT,
@@ -329,14 +424,16 @@ export class WarrenApiClient {
       if (!this.keyPair) {
         throw new WarrenApiError('no_identity', 'signed request requires an identity seed');
       }
-      const timestamp = this.now();
-      if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
+      const deviceNow = this.now();
+      if (!Number.isSafeInteger(deviceNow) || deviceNow < 0) {
         throw new WarrenApiError('bad_clock', 'system clock is not a valid unix time');
       }
+      const timestamp = this.serverClock.stamp(deviceNow);
       const sig = signWithKeyPair(this.keyPair, method, path, body, timestamp, this.nonce());
       for (const [name, value] of signatureHeaders(sig)) headers[name] = value;
+      return { headers, stamp: timestamp };
     }
-    return headers;
+    return { headers, stamp: 0 };
   }
 
   private candidates(path: string): Array<{ url: string; useSni: boolean }> {

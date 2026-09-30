@@ -24,6 +24,7 @@
 
 import { bytesToHex } from '@noble/hashes/utils';
 import { base64urlnopad } from '@scure/base';
+import { WarrenApiError } from '../api/errors.js';
 import { WarrenEdgeError } from './errors.js';
 import {
   type TokenIssuerDirectory,
@@ -163,8 +164,11 @@ export class TokenManager {
    *
    * @throws {WarrenEdgeError} `no_blinding_key` when the manager holds no
    * wallet blinding key (nothing is sent); `token_issuer` only when the
-   * directory fetch itself fails or carries an unusable epoch length; a
-   * per-epoch mint refusal or transport error is swallowed and left retryable.
+   * directory fetch itself fails or carries an unusable epoch length.
+   * @throws {WarrenApiError} with status `401` when the issuer refuses the
+   * signature (`clock_skew` for a device clock outside its window, `server`
+   * otherwise): the pass ends there. Any other per-epoch mint refusal or
+   * transport error is swallowed and left retryable.
    */
   async refresh(nowUnixSecs: number): Promise<void> {
     const blindingKey = this.blindingKey;
@@ -203,6 +207,13 @@ export class TokenManager {
         if (existing) existing.push(...serialized);
         else this.store.set(epoch, serialized);
       } catch (err) {
+        // A refused signature (a clock outside the server window, a key it
+        // does not accept) answers every epoch alike: swallowed, it would read
+        // as a refresh that went fine and stocked nothing.
+        if (err instanceof WarrenApiError && err.status === 401) {
+          this.persist();
+          throw err;
+        }
         if (err instanceof WarrenEdgeError && err.rejectReason === REJECT_ALREADY_ISSUED) {
           // The issuer's once-per-account-epoch ledger already holds this
           // account: re-asking can never succeed, so settle and stop asking.

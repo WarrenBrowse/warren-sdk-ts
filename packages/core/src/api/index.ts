@@ -1,5 +1,13 @@
 export { USER_AGENT, WarrenApiClient, type WarrenApiClientOptions } from './client.js';
 export {
+  MAX_FORWARD_CORRECTION_SECS,
+  SIGNATURE_WINDOW_SECS,
+  ServerClock,
+  applicableOffset,
+  clockOffsetSecs,
+  correctedTimestamp,
+} from './clock.js';
+export {
   fetchTransport,
   WarrenTransportError,
   type HttpTransport,

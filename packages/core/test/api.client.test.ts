@@ -4,6 +4,7 @@ import {
   type HttpRequest,
   type HttpResponse,
   type HttpTransport,
+  ServerClock,
   USER_AGENT,
   WarrenApiClient,
   WarrenApiError,
@@ -535,5 +536,161 @@ describe('browserProxyTokenTransport', () => {
     await client.tokenTransport().getDirectory();
 
     expect(requests[0]?.url).toBe('https://api.example.com/v1/tokens/keys');
+  });
+});
+
+/**
+ * A fake API whose clock is `serverOffset` seconds from the device's (fixed at
+ * FIXED_NOW). Every answer carries its Date; a signed stamp further than the
+ * window from its clock is refused 401, with the contract's clock body when
+ * `namesTheClock` and bare otherwise (warren-api before it named the cause).
+ */
+function skewedServer(
+  serverOffset: number,
+  opts: { namesTheClock: boolean; sendsDate?: boolean; unsignedDateLag?: number },
+) {
+  const serverNow = FIXED_NOW + serverOffset;
+  const stamps: number[] = [];
+  const transport: HttpTransport = {
+    async send(req) {
+      const ts = req.headers['X-Warren-Timestamp'];
+      let status = 200;
+      let body = '{"expires_at":1893456000}';
+      if (ts !== undefined) {
+        stamps.push(Number(ts));
+        if (Math.abs(Number(ts) - serverNow) > 60) {
+          status = 401;
+          body = opts.namesTheClock ? '{"error":"clock_skew"}' : '';
+        }
+      }
+      const res: HttpResponse = { status, body };
+      const dateSecs = ts === undefined ? serverNow - (opts.unsignedDateLag ?? 0) : serverNow;
+      return opts.sendsDate === false
+        ? res
+        : { ...res, date: new Date(dateSecs * 1000).toUTCString() };
+    },
+  };
+  return { transport, stamps };
+}
+
+function skewedClient(transport: HttpTransport, serverClock?: ServerClock): WarrenApiClient {
+  return new WarrenApiClient({
+    baseUrl: 'https://api.example.com',
+    seed: SEED,
+    transport,
+    now: () => FIXED_NOW,
+    ...(serverClock ? { serverClock } : {}),
+  });
+}
+
+describe('WarrenApiClient clock correction', () => {
+  // Forum topic 219: a clock 91 s fast was refused on every signed call by a
+  // server answering a bare 401. The refusal's own Date says why, so the
+  // client signs again once, at the server clock.
+  it('a device 91 s fast is refused once, then signs at the server clock', async () => {
+    const { transport, stamps } = skewedServer(-91, { namesTheClock: false });
+
+    await skewedClient(transport).subscription();
+
+    expect(stamps).toEqual([FIXED_NOW, FIXED_NOW - 91]);
+  });
+
+  it('a device 91 s slow is refused once, then signs at the server clock', async () => {
+    const { transport, stamps } = skewedServer(91, { namesTheClock: true });
+
+    await skewedClient(transport).subscription();
+
+    expect(stamps).toEqual([FIXED_NOW, FIXED_NOW + 91]);
+  });
+
+  // The relay list is public, max-age=60: a cache can hand it back with the
+  // Date it was first served under, which must never move a right clock.
+  it('a stale Date on an unsigned answer does not move the stamp', async () => {
+    const { transport, stamps } = skewedServer(0, { namesTheClock: true, unsignedDateLag: 90 });
+    const client = skewedClient(transport);
+    await client.exits();
+
+    await client.subscription();
+
+    expect(stamps).toEqual([FIXED_NOW]);
+  });
+
+  it('keeps a learned correction for the next calls', async () => {
+    const { transport, stamps } = skewedServer(-91, { namesTheClock: false });
+    const client = skewedClient(transport);
+    await client.subscription();
+
+    await client.subscription();
+
+    expect(stamps).toEqual([FIXED_NOW, FIXED_NOW - 91, FIXED_NOW - 91]);
+  });
+
+  it('a corrected stamp refused for another reason is that refusal, after two calls', async () => {
+    let call = 0;
+    const { transport, requests } = recordingTransport(() => ({
+      status: 401,
+      body: call++ === 0 ? '{"error":"clock_skew"}' : '',
+      date: new Date((FIXED_NOW - 91) * 1000).toUTCString(),
+    }));
+
+    const refused = skewedClient(transport).subscription();
+
+    await expect(refused).rejects.toMatchObject({ code: 'server', status: 401 });
+    expect(requests).toHaveLength(2);
+  });
+
+  it('a right clock is signed once, on the device clock', async () => {
+    const { transport, stamps } = skewedServer(0, { namesTheClock: true });
+    const client = skewedClient(transport);
+
+    await client.subscription();
+    await client.subscription();
+
+    expect(stamps).toEqual([FIXED_NOW, FIXED_NOW]);
+  });
+
+  it('a server further ahead than the bound is not followed, and the refusal names the clock', async () => {
+    const { transport, stamps } = skewedServer(3_600, { namesTheClock: false });
+
+    const refused = skewedClient(transport).subscription();
+
+    await expect(refused).rejects.toMatchObject({
+      code: 'clock_skew',
+      status: 401,
+      offsetSecs: 3_600,
+    });
+    expect(stamps).toEqual([FIXED_NOW]);
+  });
+
+  it('the clock body names the clock even without a Date', async () => {
+    const { transport } = skewedServer(3_600, { namesTheClock: true, sendsDate: false });
+
+    const refused = skewedClient(transport).subscription();
+
+    await expect(refused).rejects.toMatchObject({ code: 'clock_skew', offsetSecs: undefined });
+  });
+
+  it('a bare 401 on a right clock stays a server error and is not retried', async () => {
+    const { transport, requests } = recordingTransport(() => ({
+      status: 401,
+      body: '',
+      date: new Date(FIXED_NOW * 1000).toUTCString(),
+    }));
+
+    const refused = skewedClient(transport).subscription();
+
+    await expect(refused).rejects.toMatchObject({ code: 'server', status: 401 });
+    expect(requests).toHaveLength(1);
+  });
+
+  it('clients sharing a ServerClock share what it learned', async () => {
+    const clock = new ServerClock();
+    const first = skewedServer(-91, { namesTheClock: false });
+    await skewedClient(first.transport, clock).subscription();
+
+    const second = skewedServer(-91, { namesTheClock: false });
+    await skewedClient(second.transport, clock).subscription();
+
+    expect(second.stamps).toEqual([FIXED_NOW - 91]);
   });
 });

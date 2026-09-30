@@ -2,16 +2,30 @@ import { describe, expect, it } from 'vitest';
 import { fetchTransport } from '../src/index.js';
 
 /** A recording stand-in for the global fetch. */
-function fakeFetch(status: number, body: string) {
+function fakeFetch(status: number, body: string, date?: string) {
   const calls: Array<{ url: string; init: RequestInit }> = [];
   const impl = (async (url: unknown, init?: RequestInit) => {
     calls.push({ url: String(url), init: init ?? {} });
-    return { status, text: async () => body } as Response;
+    const headers = new Headers(date === undefined ? {} : { date });
+    return { status, headers, text: async () => body } as Response;
   }) as typeof fetch;
   return { impl, calls };
 }
 
 describe('fetchTransport', () => {
+  it('passes the answer Date header on, the server clock signed requests are stamped with', async () => {
+    const { impl } = fakeFetch(200, '', 'Tue, 14 Nov 2023 22:13:20 GMT');
+    const res = await fetchTransport(impl).send({
+      method: 'GET',
+      url: 'https://api.example.com/v1/exits',
+      headers: {},
+      body: '',
+      useSni: true,
+    });
+
+    expect(res.date).toBe('Tue, 14 Nov 2023 22:13:20 GMT');
+  });
+
   it('sends method, headers and body and maps status + text', async () => {
     const { impl, calls } = fakeFetch(201, '{"ok":1}');
     const res = await fetchTransport(impl).send({

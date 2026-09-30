@@ -26,6 +26,12 @@ export interface HttpResponse {
   readonly status: number;
   /** UTF-8 response body. Empty string when there is no body. */
   readonly body: string;
+  /**
+   * The answer's `Date` header, verbatim, when it carried one. The client reads
+   * the server clock off it (`ServerClock`), so a transport that drops it
+   * leaves a device with a drifted clock refused on every signed call.
+   */
+  readonly date?: string;
 }
 
 /**
@@ -73,7 +79,9 @@ export function fetchTransport(fetchImpl: typeof fetch = fetch): HttpTransport {
       // A body on GET/DELETE is rejected by fetch; only attach when present.
       if (req.body.length > 0) init.body = req.body;
       const res = await fetchImpl(req.url, init);
-      return { status: res.status, body: await res.text() };
+      const date = res.headers?.get('date') ?? null;
+      const body = await res.text();
+      return date === null ? { status: res.status, body } : { status: res.status, body, date };
     },
   };
 }

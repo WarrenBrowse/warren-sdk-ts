@@ -11,6 +11,7 @@ import {
   TokenManager,
   type TokenPersistence,
   type TokenTransport,
+  WarrenApiError,
   WarrenEdgeError,
   blindingKeyFromSeed,
 } from '../src/index.js';
@@ -57,7 +58,13 @@ function i2osp(n: bigint, len: number): Uint8Array {
   return out;
 }
 
-type IssueAction = 'sign' | 'already_issued' | 'not_subscribed' | 'throw';
+type IssueAction =
+  | 'sign'
+  | 'already_issued'
+  | 'not_subscribed'
+  | 'throw'
+  | 'clock_skew'
+  | 'unauthorized';
 
 /**
  * A fake account API backed by the fixed test issuer, with per-epoch behavior
@@ -102,6 +109,12 @@ function fakeTransport(cfg: {
       cfg.counts.set(ep.epoch, call);
       const action = cfg.behavior ? cfg.behavior(ep.epoch, call) : 'sign';
       if (action === 'throw') throw new Error('transient network failure');
+      if (action === 'clock_skew') {
+        throw new WarrenApiError('clock_skew', 'refused', { status: 401 });
+      }
+      if (action === 'unauthorized') {
+        throw new WarrenApiError('server', 'server returned status 401', { status: 401 });
+      }
       if (action !== 'sign') {
         return { epochs: [{ epoch: ep.epoch, issued: false, reject_reason: action }] };
       }
@@ -237,6 +250,28 @@ describe('TokenManager settle ledger (matches the corrected core policy)', () =>
     // The next tick retried and minted, rather than downgrading the epoch.
     expect(counts.get(EPOCH)).toBe(2);
     expect(mgr.available(EPOCH)).toBe(2);
+  });
+
+  // Forum topic 219: a clock outside the server window was refused 401 on
+  // every issue call, and the refusal read as one epoch's transient failure.
+  // A refused signature answers every epoch alike: the pass ends and says so.
+  it.each([
+    ['clock_skew', 'clock_skew'],
+    ['unauthorized', 'server'],
+  ] as const)('ends the pass on a %s refusal and surfaces it', async (action, code) => {
+    const counts = new Map<number, number>();
+    const mgr = new TokenManager(
+      fakeTransport({ epochs: [EPOCH, EPOCH + 1], counts, behavior: () => action }),
+      new InMemoryTokenPersistence(),
+      SESSION_KEY,
+    );
+
+    const refused = mgr.refresh(NOW);
+
+    await expect(refused).rejects.toBeInstanceOf(WarrenApiError);
+    await expect(refused).rejects.toMatchObject({ code, status: 401 });
+    expect(counts.get(EPOCH)).toBe(1);
+    expect(counts.get(EPOCH + 1)).toBeUndefined();
   });
 
   it('leaves an epoch retryable after a non-definitive reject (not_subscribed)', async () => {
