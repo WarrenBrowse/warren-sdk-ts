@@ -14,6 +14,12 @@ export type SplitTunnelMode = 'all' | 'bypass' | 'only';
 export interface SplitTunnelConfig {
   mode: SplitTunnelMode;
   rules: string[];
+  /**
+   * Browser tab ids whose every request follows the tunnel in `only` mode,
+   * third-party hosts included. Firefox alone tells a request's tab; Chromium
+   * routes through `chrome.proxy`, which never sees one, and ignores them.
+   */
+  tabs?: number[];
 }
 
 /** The default: tunnel all traffic. */
@@ -82,6 +88,23 @@ export function shouldTunnelHost(host: string, config: SplitTunnelConfig): boole
     default:
       return true;
   }
+}
+
+/** Whether a request from `tabId` (when the browser says) to `host` should
+ * follow the tunnel under `config`. */
+export function shouldTunnelRequest(
+  request: { host: string; tabId?: number | undefined },
+  config: SplitTunnelConfig,
+): boolean {
+  if (isLoopback(request.host)) return false;
+  if (
+    config.mode === 'only' &&
+    request.tabId !== undefined &&
+    config.tabs?.includes(request.tabId) === true
+  ) {
+    return true;
+  }
+  return shouldTunnelHost(request.host, config);
 }
 
 function parseAddress(address: string): { host: string; port: number } {

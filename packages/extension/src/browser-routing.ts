@@ -52,7 +52,7 @@ import {
   LOCKDOWN_PROXY,
   type SplitTunnelConfig,
   buildChromiumLockdownValue,
-  shouldTunnelHost,
+  shouldTunnelRequest,
 } from './split.js';
 
 export { FAIL_CLOSED_PROXY, buildChromiumLockdownValue };
@@ -203,7 +203,10 @@ export interface ProxyAuthSources {
 /** The Firefox `proxy` subset: per-request resolution plus an error signal. */
 export interface FirefoxProxyLike {
   onRequest: {
-    addListener(listener: (request: { url: string }) => unknown, filter: { urls: string[] }): void;
+    addListener(
+      listener: (request: { url: string; tabId?: number }) => unknown,
+      filter: { urls: string[] },
+    ): void;
   };
   onError?: { addListener(listener: (error: unknown) => void): void };
 }
@@ -570,7 +573,9 @@ export function attachFirefoxRouting(
           ? { type: 'direct' }
           : FAIL_CLOSED_PROXY;
       }
-      if (!shouldTunnelHost(host, state.split)) return { type: 'direct' };
+      if (!shouldTunnelRequest({ host, tabId: request.tabId }, state.split)) {
+        return { type: 'direct' };
+      }
       if (state.tier === 'multihop') {
         const auth = local?.forListener(state.socks5);
         return auth ? { ...socksProxyInfo(state.socks5), ...auth } : FAIL_CLOSED_PROXY;

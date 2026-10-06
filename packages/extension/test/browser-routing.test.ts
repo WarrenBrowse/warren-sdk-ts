@@ -435,12 +435,15 @@ describe('firefoxProxyInfoFor', () => {
 
 describe('attachFirefoxRouting', () => {
   function fakeProxyApi() {
-    const rec: { listener?: (r: { url: string }) => unknown; errors: unknown[] } = { errors: [] };
+    const rec: {
+      listener?: (r: { url: string; tabId?: number }) => unknown;
+      errors: unknown[];
+    } = { errors: [] };
     return {
       rec,
       proxy: {
         onRequest: {
-          addListener: (listener: (r: { url: string }) => unknown) => {
+          addListener: (listener: (r: { url: string; tabId?: number }) => unknown) => {
             rec.listener = listener;
           },
         },
@@ -477,6 +480,19 @@ describe('attachFirefoxRouting', () => {
     expect(await rec.listener?.({ url: 'http://localhost:8080/' })).toEqual({ type: 'direct' });
     expect(await rec.listener?.({ url: 'https://app.corp.example/' })).toEqual({ type: 'direct' });
     expect(await rec.listener?.({ url: 'https://example.com/' })).not.toEqual({ type: 'direct' });
+  });
+
+  it('tunnels every request of a listed tab and nothing else in only mode', async () => {
+    const { proxy, rec } = fakeProxyApi();
+    const store = memoryRoutingStore();
+    attachFirefoxRouting(proxy, store, provider);
+    await store.save({ ...STATE, split: { mode: 'only', rules: [], tabs: [7] } });
+    expect(await rec.listener?.({ url: 'https://cdn.example/a.js', tabId: 7 })).toEqual(
+      firefoxProxyInfoFor(HTTPS, CREDENTIAL),
+    );
+    expect(await rec.listener?.({ url: 'https://cdn.example/a.js', tabId: 8 })).toEqual({
+      type: 'direct',
+    });
   });
 
   it('fails closed when its own store cannot be read', async () => {

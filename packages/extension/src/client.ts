@@ -24,7 +24,7 @@ import {
   buildChromiumLockdownValue,
   buildChromiumProxyValue,
   buildFirefoxProxyValue,
-  shouldTunnelHost,
+  shouldTunnelRequest,
 } from './split.js';
 
 /** Discriminator for {@link WarrenExtensionError}. */
@@ -68,8 +68,11 @@ export interface ChromeSettingLike {
 
 /** A Firefox `proxy.onRequest` event, used for per-host `only` split tunneling. */
 export interface ProxyOnRequestLike {
-  addListener(callback: (request: { url: string }) => unknown, filter?: { urls: string[] }): void;
-  removeListener(callback: (request: { url: string }) => unknown): void;
+  addListener(
+    callback: (request: { url: string; tabId?: number }) => unknown,
+    filter?: { urls: string[] },
+  ): void;
+  removeListener(callback: (request: { url: string; tabId?: number }) => unknown): void;
 }
 
 /** The subset of the chrome extension API the client drives (injectable in tests). */
@@ -245,7 +248,7 @@ export class WarrenBrowserVpn {
   private releasing = false;
   private readonly hostLostListeners: Array<() => void> = [];
   private nextId = 1;
-  private onRequestHandler: ((request: { url: string }) => unknown) | undefined;
+  private onRequestHandler: ((request: { url: string; tabId?: number }) => unknown) | undefined;
   private readonly pending = new Map<
     number,
     { resolve: (r: HostResponse) => void; reject: (e: Error) => void }
@@ -407,6 +410,39 @@ export class WarrenBrowserVpn {
     } finally {
       this.connecting = false;
     }
+  }
+
+  /**
+   * Moves a live tunnel onto new options (another exit, entry or DAITA) without
+   * the browser ever going direct: it is held on the lockdown block while the
+   * host drops the old tunnel and builds the new one, and stays there when the
+   * new one fails. With no live tunnel this is {@link connect}.
+   */
+  async reconnect(options: BrowserVpnConnectOptions): Promise<ExtensionEndpoints> {
+    if (!this.tunnelUp) return this.connect(options);
+    if (this.connecting) throw new WarrenExtensionError('already_connected', 'connect in flight');
+    // Before the old listeners go: once released, their ports are anyone's to
+    // bind. Firefox needs nothing, its handler refuses a listener with no
+    // credentials, and the connect below keeps that handler until it succeeds.
+    if (this.platform === 'chromium') {
+      await this.chrome.proxy.settings.set({ value: buildChromiumLockdownValue([]) });
+    }
+    this.releasing = true;
+    try {
+      if (this.port && !this.portDead) {
+        await withTimeout(this.request({ type: 'disconnect' }), HOST_DISCONNECT_TIMEOUT_MS).catch(
+          () => undefined,
+        );
+      }
+    } finally {
+      this.tunnelUp = false;
+      this.endpoints = undefined;
+      this.auth = undefined;
+      this.exit = undefined;
+      this.closePort();
+      this.releasing = false;
+    }
+    return this.connect(options);
   }
 
   /** Throws when the host this connect is talking to has gone. */
@@ -620,9 +656,9 @@ export class WarrenBrowserVpn {
       host: socks5.slice(0, sep),
       port: Number(socks5.slice(sep + 1)),
     };
-    const handler = (request: { url: string }): unknown => {
+    const handler = (request: { url: string; tabId?: number }): unknown => {
       const host = new URL(request.url).hostname;
-      if (!shouldTunnelHost(host, split)) return { type: 'direct' };
+      if (!shouldTunnelRequest({ host, tabId: request.tabId }, split)) return { type: 'direct' };
       // Read per request: once the host is gone its port is anyone's to take,
       // and the request stalls instead of reaching it.
       const auth = this.forListener(socks5);

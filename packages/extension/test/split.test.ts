@@ -5,6 +5,7 @@ import {
   buildFirefoxProxyValue,
   hostMatchesRule,
   shouldTunnelHost,
+  shouldTunnelRequest,
 } from '../src/split.js';
 
 const SOCKS = '127.0.0.1:1080';
@@ -58,6 +59,25 @@ describe('shouldTunnelHost', () => {
     const cfg: SplitTunnelConfig = { mode: 'only', rules: ['work.example'] };
     expect(shouldTunnelHost('work.example', cfg)).toBe(true);
     expect(shouldTunnelHost('personal.example', cfg)).toBe(false);
+  });
+});
+
+describe('shouldTunnelRequest', () => {
+  it('only mode tunnels every request of a listed tab, whatever its host', () => {
+    const cfg: SplitTunnelConfig = { mode: 'only', rules: [], tabs: [7] };
+    expect(shouldTunnelRequest({ host: 'cdn.example', tabId: 7 }, cfg)).toBe(true);
+    expect(shouldTunnelRequest({ host: 'cdn.example', tabId: 8 }, cfg)).toBe(false);
+    expect(shouldTunnelRequest({ host: 'cdn.example' }, cfg)).toBe(false);
+  });
+
+  it('keeps loopback direct even inside a listed tab', () => {
+    const cfg: SplitTunnelConfig = { mode: 'only', rules: [], tabs: [7] };
+    expect(shouldTunnelRequest({ host: 'localhost', tabId: 7 }, cfg)).toBe(false);
+  });
+
+  it('still honours the host rules beside the tabs', () => {
+    const cfg: SplitTunnelConfig = { mode: 'only', rules: ['work.example'], tabs: [7] };
+    expect(shouldTunnelRequest({ host: 'work.example', tabId: 3 }, cfg)).toBe(true);
   });
 });
 

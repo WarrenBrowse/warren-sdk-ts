@@ -445,6 +445,105 @@ describe('WarrenBrowserVpn fail-closed behavior', () => {
   });
 });
 
+describe('WarrenBrowserVpn.reconnect', () => {
+  /** A host that records what it was asked, and fails the connects listed. */
+  function recordingHost(failConnects: number[] = []) {
+    const asked: HostRequest[] = [];
+    let connects = 0;
+    const script = (req: HostRequest, port: FakePort) => {
+      asked.push(req);
+      if (req.type === 'connect') {
+        connects += 1;
+        if (failConnects.includes(connects)) {
+          port.emit({ id: req.id, ok: false, code: 'no_exit', message: 'no exit there' });
+          return;
+        }
+      }
+      healthyHost(req, port);
+    };
+    return { asked, script };
+  }
+  const LOCKDOWN_SET = `proxy.set:${JSON.stringify(buildChromiumLockdownValue([]))}`;
+
+  it('moves a live tunnel to the new exit, holding the browser on the block in between', async () => {
+    const { asked, script } = recordingHost();
+    const { chrome, calls } = fakeChrome(script);
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm', selector: { country: 'FR' } });
+    const after = calls.length;
+
+    await vpn.reconnect({ mnemonic: 'm', selector: { country: 'DE' } });
+
+    const proxyCalls = calls
+      .slice(after)
+      .filter((c) => c.startsWith('proxy.set') || c === 'proxy.clear');
+    expect(proxyCalls).not.toContain('proxy.clear');
+    expect(proxyCalls[0]).toBe(LOCKDOWN_SET);
+    expect(proxyCalls.at(-1)).toContain('8118');
+    expect(asked.map((r) => r.type)).toEqual([
+      'hello',
+      'connect',
+      'disconnect',
+      'hello',
+      'connect',
+    ]);
+    expect(asked.at(-1)).toMatchObject({ type: 'connect', selector: { country: 'DE' } });
+    expect(vpn.forListener(LISTENERS.http)).toEqual(AUTH);
+  });
+
+  it('leaves the browser on the block, never direct, when the new exit fails', async () => {
+    const { script } = recordingHost([2]);
+    const { chrome, calls } = fakeChrome(script);
+    // The browser reads back what was last set, as Chromium does.
+    let current: unknown;
+    const set = chrome.proxy.settings.set.bind(chrome.proxy.settings);
+    chrome.proxy.settings.set = (details) => {
+      current = details.value;
+      return set(details);
+    };
+    chrome.proxy.settings.get = () => ({
+      levelOfControl: current ? 'controlled_by_this_extension' : 'controllable_by_this_extension',
+      value: current,
+    });
+    const vpn = new WarrenBrowserVpn({ chrome });
+    await vpn.connect({ mnemonic: 'm' });
+    const after = calls.length;
+
+    await expect(vpn.reconnect({ mnemonic: 'm', selector: { country: 'DE' } })).rejects.toThrow();
+
+    const proxyCalls = calls
+      .slice(after)
+      .filter((c) => c.startsWith('proxy.set') || c === 'proxy.clear');
+    expect(proxyCalls).not.toContain('proxy.clear');
+    expect(proxyCalls.at(-1)).toBe(LOCKDOWN_SET);
+    expect(vpn.isProxied()).toBe(true);
+  });
+
+  it('reports no lost host for the tunnel it released itself', async () => {
+    const { chrome } = fakeChrome((req, p) => {
+      healthyHost(req, p);
+      if (req.type === 'disconnect') p.die();
+    });
+    const vpn = new WarrenBrowserVpn({ chrome });
+    const lost = vi.fn();
+    vpn.onHostLost(lost);
+    await vpn.connect({ mnemonic: 'm' });
+
+    await vpn.reconnect({ mnemonic: 'm', selector: { country: 'DE' } });
+
+    expect(lost).not.toHaveBeenCalled();
+  });
+
+  it('connects as usual when no tunnel is up', async () => {
+    const { asked, script } = recordingHost();
+    const { chrome } = fakeChrome(script);
+    const vpn = new WarrenBrowserVpn({ chrome });
+
+    await expect(vpn.reconnect({ mnemonic: 'm' })).resolves.toEqual(LISTENERS);
+    expect(asked.map((r) => r.type)).toEqual(['hello', 'connect']);
+  });
+});
+
 describe('WarrenBrowserVpn over a routing it already holds', () => {
   const HELD = {
     mode: 'fixed_servers',
@@ -602,7 +701,7 @@ describe('WarrenBrowserVpn Firefox only-mode handlers', () => {
   /** A Firefox chrome whose onRequest handlers are all observable. */
   function firefoxWithHandlers(script: (req: HostRequest, port: FakePort) => void = healthyHost) {
     const base = fakeChrome(script, { control: ['controlled_by_this_extension'] });
-    const handlers = new Set<(req: { url: string }) => unknown>();
+    const handlers = new Set<(req: { url: string; tabId?: number }) => unknown>();
     const handlersAtSet: number[] = [];
     base.chrome.proxy.settings.set = () => {
       handlersAtSet.push(handlers.size);
@@ -659,6 +758,19 @@ describe('WarrenBrowserVpn Firefox only-mode handlers', () => {
       ...AUTH,
     });
     expect(handler!({ url: 'https://bank.example/' })).toEqual({ type: 'direct' });
+  });
+
+  it('tunnels every request of a listed tab, third-party hosts included', async () => {
+    const { chrome, handlers } = firefoxWithHandlers();
+    const vpn = new WarrenBrowserVpn({ chrome, platform: 'firefox' });
+    await vpn.connect({ mnemonic: 'm', split: { mode: 'only', rules: [], tabs: [7] } });
+    const [handler] = handlers;
+
+    expect(handler!({ url: 'https://cdn.example/a.js', tabId: 7 })).toMatchObject({
+      type: 'socks',
+      port: 1080,
+    });
+    expect(handler!({ url: 'https://cdn.example/a.js', tabId: 8 })).toEqual({ type: 'direct' });
   });
 
   it('leaves no handler behind after a reconnect over a dead host and a disconnect', async () => {
