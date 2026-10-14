@@ -17,7 +17,7 @@ hex = "0.4"
 # warren-sdk. Cargo.lock is not tracked here, so this rev is the whole pin. To
 # build against a working copy of warren-sdk-rs instead, use the gitignored
 # override described in ../README.md.
-warren-sdk = { git = "https://github.com/WarrenBrowse/warren-sdk-rs.git", rev = "efec1a89678d6d13a0e0030af52e428dd69d76da" }
+warren-sdk = { git = "https://github.com/WarrenBrowse/warren-sdk-rs.git", rev = "afc9324f3da8274bcfe578150e4c161ac42a34ec" }
 
 [build-dependencies]
 napi-build = "2"
