@@ -39,7 +39,7 @@
     "build:example": "tsup --config tsup.example.config.ts"
   },
   "dependencies": {
-    "@scure/base": "^1",
+    "@scure/base": "^1.2.6",
     "@warrenbrowse/sdk-core": "workspace:*",
     "@warrenbrowse/sdk-node": "workspace:*"
   }
