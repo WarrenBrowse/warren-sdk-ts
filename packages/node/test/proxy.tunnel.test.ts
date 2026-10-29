@@ -1,15 +1,23 @@
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   NATIVE_BINDING_ABI,
   type NativeProxyEndpoints,
+  type NativeProxyOptions,
   type NativeWarrenProxy,
   type ProxyFatalCause,
   type ProxyMetrics,
   type ProxyState,
   ProxyTunnel,
+  type ProxyTunnelOptions,
   WarrenProxyError,
+  defaultDeviceIdentityPath,
   isProxyDatapathAvailable,
   nativeBindingStatus,
+  nodeDevicePlatform,
+  parseDeviceIdentity,
   proxyDatapathStatus,
 } from '../src/index.js';
 
@@ -50,6 +58,45 @@ describe('ProxyTunnel facade', () => {
     expect((err as WarrenProxyError).message).not.toContain('not a mnemonic');
   });
 
+  it.skipIf(!available)('keeps the device identity where the engine registers it', () => {
+    const stateDir = join(mkdtempSync(join(tmpdir(), 'warren-napi-')), 'state');
+    const tunnel = ProxyTunnel.create({
+      mnemonic: VECTOR_MNEMONIC,
+      apiBase: 'https://api.warrenbrowse.com',
+      serverPubkeyPin: '00'.repeat(32),
+      stateDir,
+      device: { appVersion: '0.0.0' },
+    });
+
+    const kept = parseDeviceIdentity(readFileSync(join(stateDir, 'device.json'), 'utf8'));
+
+    expect(kept?.name.split(' ')).toHaveLength(2);
+    expect(tunnel.deviceRevoked()).toBe(false);
+    tunnel.forgetDevice();
+    expect(() => readFileSync(join(stateDir, 'device.json'))).toThrow();
+  });
+
+  it.skipIf(!available)('refuses to register on a platform outside the registry', () => {
+    const err = (() => {
+      try {
+        ProxyTunnel.create({
+          mnemonic: VECTOR_MNEMONIC,
+          apiBase: 'https://api.warrenbrowse.com',
+          serverPubkeyPin: '00'.repeat(32),
+          device: {
+            appVersion: '0.0.0',
+            platform: 'other' as never,
+            identityPath: '/nonexistent/d',
+          },
+        });
+      } catch (e) {
+        return e;
+      }
+      throw new Error('expected a throw');
+    })();
+    expect((err as WarrenProxyError).code).toBe('config');
+  });
+
   it.skipIf(!available)('rejects connect after shutdown fail-closed, offline', async () => {
     const tunnel = vectorTunnel();
     await tunnel.shutdown();
@@ -83,6 +130,9 @@ describe('ProxyTunnel facade', () => {
  */
 class ScriptedNative implements NativeWarrenProxy {
   readonly address = 'wbTEST';
+  deviceRevoked?: () => boolean;
+  deviceLimitReached?: () => boolean;
+  forgetDevice?: () => void;
   private stateCb: ((state: string) => void) | null = null;
   constructor(
     private readonly fatal: ProxyFatalCause | null,
@@ -279,5 +329,109 @@ describe('native binding ABI', () => {
     expect((err as WarrenProxyError).code).toBe('outdated');
     expect((err as WarrenProxyError).message).toContain('rebuild');
     expect(isProxyDatapathAvailable()).toBe(false);
+  });
+});
+
+describe('ProxyTunnel device registration', () => {
+  /** Builds a tunnel over a scripted native, returning what the engine was handed. */
+  function handed(options: Partial<ProxyTunnelOptions>): NativeProxyOptions | null {
+    let seen: NativeProxyOptions | null | undefined;
+    ProxyTunnel.create({
+      mnemonic: 'x',
+      apiBase: 'x',
+      serverPubkeyPin: 'x',
+      ...options,
+      nativeFactory: (native) => {
+        seen = native;
+        return new ScriptedNative(null);
+      },
+    });
+    if (seen === undefined) throw new Error('the factory was not called');
+    return seen;
+  }
+
+  it('hands the engine the identity beside its state, the OS platform and the version', () => {
+    const native = handed({ stateDir: join('state', 'warren'), device: { appVersion: '0.4.2' } });
+
+    expect(native?.device).toEqual({
+      identityPath: join('state', 'warren', 'device.json'),
+      platform: nodeDevicePlatform(),
+      appVersion: '0.4.2',
+    });
+    expect(native?.stateDir).toBe(join('state', 'warren'));
+  });
+
+  it('keeps the identity at the default path without a state directory', () => {
+    expect(handed({ device: { appVersion: '0.4.2' } })?.device?.identityPath).toBe(
+      defaultDeviceIdentityPath(),
+    );
+  });
+
+  it('takes an identity path and a platform the caller names', () => {
+    const native = handed({
+      device: { appVersion: '0.1.8', platform: 'browser', identityPath: '/x/d.json' },
+    });
+
+    expect(native?.device).toEqual({
+      identityPath: '/x/d.json',
+      platform: 'browser',
+      appVersion: '0.1.8',
+    });
+  });
+
+  it('registers nothing without the option', () => {
+    expect(handed({})).toBeNull();
+  });
+
+  it('reads a revocation and the device cap from the engine, and forgets through it', () => {
+    const native = new ScriptedNative(null);
+    let forgotten = 0;
+    native.deviceRevoked = () => true;
+    native.deviceLimitReached = () => true;
+    native.forgetDevice = () => {
+      forgotten += 1;
+    };
+    const tunnel = ProxyTunnel.create({
+      mnemonic: 'x',
+      apiBase: 'x',
+      serverPubkeyPin: 'x',
+      nativeFactory: () => native,
+    });
+
+    expect(tunnel.deviceRevoked()).toBe(true);
+    expect(tunnel.deviceLimitReached()).toBe(true);
+    tunnel.forgetDevice();
+    expect(forgotten).toBe(1);
+  });
+
+  it('reads an engine without a device surface as neither revoked nor capped', () => {
+    const tunnel = ProxyTunnel.create({
+      mnemonic: 'x',
+      apiBase: 'x',
+      serverPubkeyPin: 'x',
+      nativeFactory: () => new ScriptedNative(null),
+    });
+
+    expect(tunnel.deviceRevoked()).toBe(false);
+    expect(tunnel.deviceLimitReached()).toBe(false);
+  });
+
+  it('types a connect the engine refuses for a revoked device or the device cap', async () => {
+    for (const code of ['device_revoked', 'device_limit'] as const) {
+      const native = new ScriptedNative(null);
+      native.connect = async () => {
+        throw new Error(`${code}: refused`);
+      };
+      const tunnel = ProxyTunnel.create({
+        mnemonic: 'x',
+        apiBase: 'x',
+        serverPubkeyPin: 'x',
+        nativeFactory: () => native,
+      });
+
+      const err = await tunnel.connect().catch((e: unknown) => e);
+
+      expect((err as WarrenProxyError).code).toBe(code);
+    }
   });
 });

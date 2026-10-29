@@ -9,3 +9,8 @@ export * from '@warrenbrowse/sdk-core';
 export * from './warrend/index.js';
 export * from './proxy/tunnel.js';
 export { defaultTokenStorePath, fileTokenPersistence } from './token-store.js';
+export {
+  defaultDeviceIdentityPath,
+  fileDeviceIdentityPersistence,
+  nodeDevicePlatform,
+} from './device-store.js';

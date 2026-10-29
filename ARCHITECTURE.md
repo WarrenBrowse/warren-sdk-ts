@@ -158,14 +158,16 @@ import { ProxyTunnel, isProxyDatapathAvailable, WarrendClient } from '@warrenbro
 
 // Proxy mode (non-root): a real tunnel + local SOCKS5/HTTP, via the napi-rs
 // engine. Options: alternativeHosts, multihopRootPinHex, daita(Machine),
-// requestIpv6, stateDir (anti-rollback + TOFU persistence), onState events.
+// requestIpv6, stateDir (anti-rollback + TOFU persistence), device (registers
+// the install in the account's device registry), onState events.
 const tunnel = ProxyTunnel.create({ mnemonic, apiBase, serverPubkeyPin, onState });
 const { socks5 } = await tunnel.connect({ selector: { country: 'NL' } });
 await tunnel.metrics(); // one-shot datapath counters (supervised: false)
 const port = await tunnel.forwardPort('Tcp', 8080, '127.0.0.1:8080'); // NAT-PMP
 await tunnel.shutdown();
 // Typed WarrenProxyError with stable codes (identity|api|discovery|tunnel|
-// config|unsupported|unavailable), redacted at the FFI boundary.
+// config|unsupported|unavailable|device_revoked|device_limit), redacted at the
+// FFI boundary. deviceRevoked() / deviceLimitReached() / forgetDevice().
 
 // System-VPN mode: drive the privileged warrend daemon over its JSON IPC.
 // Fail-closed lifecycle; typed WarrendError; frame codec exported for tests.

@@ -14,7 +14,7 @@ use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFun
 use napi::JsFunction;
 use napi_derive::napi;
 
-use warren_sdk::api::ClientError;
+use warren_sdk::api::{ClientError, DevicePlatform};
 use warren_sdk::discovery::{CircuitPolicy, VerifiedExit};
 use warren_sdk::identity::WarrenIdentity;
 use warren_sdk::net::{ForwardedPort, MapProto, ProxyConfig};
@@ -49,7 +49,30 @@ fn map_client_error(e: ClientError) -> napi::Error {
         ClientError::ServerStatus { status, .. } => {
             err("api", format_args!("server returned status {status}"))
         }
+        // The device registry's verdicts (warren-core doc 115) cross as their
+        // own kinds: a revoked device stops and forgets its identity, a
+        // capped account opens its device list. No retry heals either.
+        e @ ClientError::DeviceRevoked => err("device_revoked", e),
+        e @ ClientError::DeviceLimitReached => err("device_limit", e),
         other => err("api", other),
+    }
+}
+
+/// Reads the platform a device registers as. `other` and anything outside
+/// the registry's closed set are refused: the server would answer 400.
+fn device_platform(name: &str) -> napi::Result<DevicePlatform> {
+    match name {
+        "android" => Ok(DevicePlatform::Android),
+        "ios" => Ok(DevicePlatform::Ios),
+        "macos" => Ok(DevicePlatform::Macos),
+        "windows" => Ok(DevicePlatform::Windows),
+        "linux" => Ok(DevicePlatform::Linux),
+        "cli" => Ok(DevicePlatform::Cli),
+        "browser" => Ok(DevicePlatform::Browser),
+        _ => Err(err(
+            "config",
+            "a device registers on a platform the registry knows",
+        )),
     }
 }
 
@@ -125,6 +148,21 @@ pub struct WarrenProxyOptions {
     /// across restarts (`FileGenerationStore`/`FileServerKeyStore`). Without it
     /// they live in memory only.
     pub state_dir: Option<String>,
+    /// Registers this install as a device of the account (warren-core doc
+    /// 115), through `WarrenClientBuilder::device`.
+    pub device: Option<DeviceOptions>,
+}
+
+/// How the install registers as a device of the account.
+#[napi(object)]
+pub struct DeviceOptions {
+    /// The file its identity is kept in (the SDK's format), drawn there on
+    /// first use. Its directory is created.
+    pub identity_path: String,
+    /// `android`, `ios`, `macos`, `windows`, `linux`, `cli` or `browser`.
+    pub platform: String,
+    /// The app version it registers with.
+    pub app_version: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -473,7 +511,7 @@ impl ConnectedSession {
 /// builds a tunnel on it (`NATIVE_BINDING_ABI` in `src/proxy/tunnel.ts`). The
 /// addon is built outside `pnpm build`, so a checkout can carry one from an
 /// older SDK. Bump both together whenever a field the facade reads changes.
-pub const BINDING_ABI: u32 = 1;
+pub const BINDING_ABI: u32 = 2;
 
 /// Reports [`BINDING_ABI`]. An addon without this export predates it.
 #[napi]
@@ -595,6 +633,18 @@ impl WarrenProxy {
                 .server_key_store(Arc::new(key_store));
         }
 
+        if let Some(device) = options.device {
+            let platform = device_platform(&device.platform)?;
+            let path = std::path::PathBuf::from(device.identity_path);
+            // An identity that cannot be kept would be drawn anew at every
+            // start, a new line in the account's list each time.
+            if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+                std::fs::create_dir_all(dir)
+                    .map_err(|_| err("config", "the device identity directory is not usable"))?;
+            }
+            builder = builder.device(path, platform, device.app_version);
+        }
+
         let client = builder.build().map_err(map_build_error)?;
         Ok(Self {
             client: Arc::new(client),
@@ -608,6 +658,28 @@ impl WarrenProxy {
     #[napi(getter)]
     pub fn address(&self) -> String {
         self.address.clone()
+    }
+
+    /// Whether this install's device was revoked from another device of the
+    /// account, as the last credential refresh learned. Sticky.
+    #[napi]
+    pub fn device_revoked(&self) -> bool {
+        self.client.device_revoked()
+    }
+
+    /// Whether the last credential refresh found the account's device cap
+    /// reached. Not sticky.
+    #[napi]
+    pub fn device_limit_reached(&self) -> bool {
+        self.client.device_limit_reached()
+    }
+
+    /// Erases the kept device identity, once revoked or logged out.
+    #[napi]
+    pub fn forget_device(&self) -> napi::Result<()> {
+        self.client
+            .forget_device()
+            .map_err(|_| err("config", "the device identity could not be erased"))
     }
 
     /// Registers (or replaces) the state-change callback for future
@@ -1064,6 +1136,41 @@ mod tests {
             .multihop_root_pubkey_pin("0".repeat(64))
             .build_with_transport(NoHttp)
             .expect("offline client builds")
+    }
+
+    #[test]
+    fn reads_every_registrable_platform_and_refuses_the_rest() {
+        for (name, platform) in [
+            ("android", DevicePlatform::Android),
+            ("ios", DevicePlatform::Ios),
+            ("macos", DevicePlatform::Macos),
+            ("windows", DevicePlatform::Windows),
+            ("linux", DevicePlatform::Linux),
+            ("cli", DevicePlatform::Cli),
+            ("browser", DevicePlatform::Browser),
+        ] {
+            assert_eq!(device_platform(name).ok(), Some(platform), "{name}");
+        }
+        for refused in ["other", "vision_os", "", "Browser"] {
+            let e = device_platform(refused).expect_err(refused);
+            assert!(e.reason.starts_with("config: "), "{refused}: {}", e.reason);
+        }
+    }
+
+    #[test]
+    fn a_device_refusal_crosses_as_its_own_kind() {
+        let revoked = map_client_error(ClientError::DeviceRevoked);
+        assert!(
+            revoked.reason.starts_with("device_revoked: "),
+            "{}",
+            revoked.reason
+        );
+        let capped = map_client_error(ClientError::DeviceLimitReached);
+        assert!(
+            capped.reason.starts_with("device_limit: "),
+            "{}",
+            capped.reason
+        );
     }
 
     #[test]

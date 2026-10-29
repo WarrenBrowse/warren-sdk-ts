@@ -2,6 +2,8 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import type { RegistrablePlatform } from '@warrenbrowse/sdk-core';
+import { defaultDeviceIdentityPath, nodeDevicePlatform } from '../device-store.js';
 
 /** Tunnel lifecycle states reported by {@link ProxyTunnelOptions.onState}. */
 export type ProxyState =
@@ -35,15 +37,49 @@ export interface ProxyTunnelOptions {
    * server pin across restarts. Without it they live in memory only.
    */
   stateDir?: string;
+  /**
+   * Registers this install as a device of the account (warren-core doc 115):
+   * the engine registers it at every credential refresh and names it on every
+   * issue request. Read {@link ProxyTunnel.deviceRevoked} after a failure: a
+   * revoked device disconnects and calls {@link ProxyTunnel.forgetDevice}.
+   */
+  device?: ProxyDeviceOptions;
   /** Called on every tunnel lifecycle transition. Register before `connect()`. */
   onState?: (state: ProxyState) => void;
   /**
-   * Supplies the native datapath binding instead of loading the built addon.
-   * The DI seam the warrend client exposes via `connectFactory`: used to drive
-   * the facade with a fake in tests, or to embed a custom binding. Omit for
-   * normal use (the real napi addon is loaded).
+   * Supplies the native datapath binding instead of loading the built addon,
+   * handed the options the addon would be built with. The DI seam the warrend
+   * client exposes via `connectFactory`: used to drive the facade with a fake
+   * in tests, or to embed a custom binding. Omit for normal use (the real
+   * napi addon is loaded).
    */
-  nativeFactory?: () => NativeWarrenProxy;
+  nativeFactory?: (options: NativeProxyOptions | null) => NativeWarrenProxy;
+}
+
+/** How a {@link ProxyTunnel} registers its install as a device of the account. */
+export interface ProxyDeviceOptions {
+  /** The app version the device registers with, `[0-9A-Za-z.+-]`, at most 32 characters. */
+  appVersion: string;
+  /** Defaults to this operating system's ({@link nodeDevicePlatform}). */
+  platform?: RegistrablePlatform;
+  /**
+   * The file the identity is kept in, in the Rust SDK's format (see
+   * `fileDeviceIdentityPersistence`): drawn there on first use, read back
+   * after. Defaults to `device.json` in `stateDir`, else
+   * `defaultDeviceIdentityPath()`.
+   */
+  identityPath?: string;
+}
+
+/** The options the native addon is built with: the knobs, the device resolved. */
+export interface NativeProxyOptions {
+  alternativeHosts?: string[];
+  multihopRootPinHex?: string;
+  daita?: boolean;
+  daitaMachine?: string;
+  requestIpv6?: boolean;
+  stateDir?: string;
+  device?: { identityPath: string; platform: RegistrablePlatform; appVersion: string };
 }
 
 /** Exit selection for {@link ProxyTunnel.connect}. All-unset picks the first cross-checked exit. */
@@ -201,7 +237,11 @@ export type WarrenProxyErrorCode =
   | 'egress'
   | 'unsupported'
   | 'unavailable'
-  | 'outdated';
+  | 'outdated'
+  /** The device was revoked from another device of the account: disconnect and forget it. */
+  | 'device_revoked'
+  /** The account holds as many devices as it may: this install is issued nothing. */
+  | 'device_limit';
 
 const NATIVE_CODES: readonly WarrenProxyErrorCode[] = [
   'identity',
@@ -211,6 +251,8 @@ const NATIVE_CODES: readonly WarrenProxyErrorCode[] = [
   'config',
   'egress',
   'unsupported',
+  'device_revoked',
+  'device_limit',
 ];
 
 /** Thrown when the native datapath addon is missing or a datapath call fails. */
@@ -267,6 +309,12 @@ export interface NativeWarrenProxy {
     internalPort: number,
     localTarget: string,
   ): Promise<NativeForwardedPort>;
+  /** Whether the device was revoked, as the last credential refresh learned. */
+  deviceRevoked?(): boolean;
+  /** Whether the last credential refresh found the account's device cap reached. */
+  deviceLimitReached?(): boolean;
+  /** Erases the kept device identity. */
+  forgetDevice?(): void;
 }
 interface NativeBinding {
   bindingAbi(): number;
@@ -274,8 +322,29 @@ interface NativeBinding {
     mnemonic: string,
     apiBase: string,
     serverPubkeyPin: string,
-    options?: object | null,
+    options?: NativeProxyOptions | null,
   ) => NativeWarrenProxy;
+}
+
+/** The options the addon is built with, or `null` when none is set. */
+function nativeProxyOptions(
+  options: Omit<
+    ProxyTunnelOptions,
+    'mnemonic' | 'apiBase' | 'serverPubkeyPin' | 'onState' | 'nativeFactory'
+  >,
+): NativeProxyOptions | null {
+  const { device, ...knobs } = options;
+  const native: NativeProxyOptions = { ...knobs };
+  if (device) {
+    native.device = {
+      identityPath:
+        device.identityPath ??
+        (knobs.stateDir ? join(knobs.stateDir, 'device.json') : defaultDeviceIdentityPath()),
+      platform: device.platform ?? nodeDevicePlatform(),
+      appVersion: device.appVersion,
+    };
+  }
+  return Object.keys(native).length > 0 ? native : null;
 }
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -291,7 +360,7 @@ const NATIVE_CANDIDATES = [
  * `bindingAbi()` (`BINDING_ABI` in `native/warren-napi/src/lib.rs`). Bump both
  * together whenever a field the facade reads changes.
  */
-export const NATIVE_BINDING_ABI = 1;
+export const NATIVE_BINDING_ABI = 2;
 
 /** Whether the native datapath can carry a tunnel: built and matching this facade. */
 export type ProxyDatapathStatus = 'ready' | 'missing' | 'outdated';
@@ -407,10 +476,11 @@ export class ProxyTunnel {
   /** Builds a tunnel client. Throws {@link WarrenProxyError} if the native addon is unavailable. */
   static create(options: ProxyTunnelOptions): ProxyTunnel {
     const { mnemonic, apiBase, serverPubkeyPin, onState, nativeFactory, ...knobs } = options;
+    const nativeOptions = nativeProxyOptions(knobs);
     let native: NativeWarrenProxy;
     if (nativeFactory) {
       try {
-        native = nativeFactory();
+        native = nativeFactory(nativeOptions);
       } catch (cause) {
         throw mapNativeError(cause);
       }
@@ -420,12 +490,7 @@ export class ProxyTunnel {
       // re-wrapped to a generic `tunnel` code.
       const { WarrenProxy } = loadNative();
       try {
-        native = new WarrenProxy(
-          mnemonic,
-          apiBase,
-          serverPubkeyPin,
-          Object.keys(knobs).length > 0 ? knobs : null,
-        );
+        native = new WarrenProxy(mnemonic, apiBase, serverPubkeyPin, nativeOptions);
       } catch (cause) {
         throw mapNativeError(cause);
       }
@@ -437,6 +502,37 @@ export class ProxyTunnel {
   /** The signer's SS58 `wb...` address. */
   get address(): string {
     return this.native.address;
+  }
+
+  /**
+   * Whether this install's device was revoked from another device of the
+   * account, as the engine's last credential refresh learned. Sticky. The
+   * consumer disconnects, tells the user, and calls {@link forgetDevice};
+   * coming back takes the recovery phrase.
+   */
+  deviceRevoked(): boolean {
+    return this.native.deviceRevoked?.() ?? false;
+  }
+
+  /**
+   * Whether the engine's last credential refresh found the account's device
+   * cap reached: this install is issued no session token until another
+   * device of the account is revoked. Not sticky.
+   */
+  deviceLimitReached(): boolean {
+    return this.native.deviceLimitReached?.() ?? false;
+  }
+
+  /**
+   * Erases this install's kept device identity, once it was revoked or logged
+   * out: the next tunnel built over the same path draws a new one.
+   */
+  forgetDevice(): void {
+    try {
+      this.native.forgetDevice?.();
+    } catch (cause) {
+      throw mapNativeError(cause);
+    }
   }
 
   /** Brings up the tunnel and the local proxy listener(s); resolves with their endpoints and credentials. */

@@ -3,7 +3,8 @@
  *
  * Every rejected promise carries a `message` of the form `"<kind>: text"`
  * where `kind` is one of `identity | api | discovery | tunnel | config |
- * unsupported` (mirrors the sibling SDKs' sealed `WarrenError` hierarchy).
+ * unsupported | egress | device_revoked | device_limit` (mirrors the sibling
+ * SDKs' sealed `WarrenError` hierarchy).
  * Split on the first `": "` to get a stable, JS-dispatchable code plus a
  * redacted, human-readable message (never a pubkey/address/IP/secret).
  */
@@ -25,6 +26,13 @@ export interface WarrenProxyOptions {
    * across restarts. Without it they live in memory only (reset per launch).
    */
   stateDir?: string;
+  /**
+   * Registers this install as a device of the account (warren-core doc 115).
+   * The identity is kept at `identityPath` in the SDK's format (its directory
+   * is created); `platform` is one of `android | ios | macos | windows | linux
+   * | cli | browser`, anything else a `config` error.
+   */
+  device?: { identityPath: string; platform: string; appVersion: string };
 }
 
 /** Exit selection for `connect()`. An all-unset query picks the first cross-checked exit. */
@@ -179,6 +187,12 @@ export declare class WarrenProxy {
 
   /** The signer's SS58 `wb...` address. */
   get address(): string;
+  /** Whether the device was revoked from another device of the account. Sticky. */
+  deviceRevoked(): boolean;
+  /** Whether the last credential refresh found the account's device cap reached. */
+  deviceLimitReached(): boolean;
+  /** Erases the kept device identity, once revoked or logged out. */
+  forgetDevice(): void;
 
   /**
    * Registers (or replaces) the state-change callback for future
