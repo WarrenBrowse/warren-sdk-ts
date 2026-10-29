@@ -126,10 +126,22 @@ today's warren-app.
   with `exits`, `register`, `subscription`, `check`, `sessionOpen`, `sessionClose`,
   `deleteAccount`, `submitSupport`, `initApplePayment`, `checkApplePayment`,
   `reportExitDown`, `reportPubkeyMismatch`, `pullPendingVoucher`,
-  `multihopDirectory`, plus `dispose()` (zeroizes the signing key). A
+  `multihopDirectory`, the device registry routes (`registerDevice`,
+  `listDevices`, `renameDevice`, `revokeDevice`, warren-core doc 115), plus
+  `dispose()` (zeroizes the signing key). A
   `HttpTransport` seam (`fetchTransport`, default isomorphic `fetch`),
   anti-censorship host fallback advancing only on connect failures, typed
   redacted `WarrenApiError` / `WarrenTransportError`.
+- Device registry: `DeviceIdentity` (`generateDeviceIdentity`, the shared
+  two-word `deviceNameFrom` lists, `keptDeviceIdentity` / `keepDeviceName` /
+  `forgetDeviceIdentity` over a `DeviceIdentityPersistence` kept in the Rust
+  SDK's file format), `parseDeviceId`, `deviceRegistration`, typed
+  `device_revoked` / `device_unregistered` / `device_limit_reached` API errors,
+  and `TokenManager`'s `device` option: every refresh registers first, names
+  the device on every issue request, registers again once on
+  `device_unregistered`, stops for good and drops its stock on
+  `device_revoked`, and issues on past a server without the registry. Pinned
+  by `vectors/device_registry_v1.json`.
 - Discovery: `verifySignedRelayList(json, pins?)` (`SIGNED_VERSION`),
   `verifyMultihopDirectory(json, serverPins?, rootPins?)`
   (`MULTIHOP_DIRECTORY_VERSION`), `isExpired`, `isDirectoryExpired`,

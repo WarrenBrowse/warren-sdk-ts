@@ -1,4 +1,5 @@
 import { randomNonceHex } from '../crypto/random.js';
+import { readDeviceList, readDeviceView } from '../device/index.js';
 import type {
   TokenIssueRequest,
   TokenIssueResponse,
@@ -91,6 +92,45 @@ function stampFitsTheWindow(res: HttpResponse, stamp: number): boolean {
 
 function stampOffset(res: HttpResponse, stamp: number): number | undefined {
   return res.date === undefined ? undefined : clockOffsetSecs(res.date, stamp);
+}
+
+const DEVICES_PATH = '/v1/devices';
+
+function devicePath(id: dto.DeviceId): string {
+  return `${DEVICES_PATH}/${encodeURIComponent(id)}`;
+}
+
+/**
+ * Types the device registry's refusals (warren-core doc 115): the 403 a
+ * registration, an issuance or a device route answers a revoked or an
+ * unregistered device. Any other answer, a 403 with another body included,
+ * passes through.
+ */
+function deviceRefusal(res: HttpResponse): HttpResponse {
+  if (res.status !== 403) return res;
+  let error: unknown;
+  try {
+    error = (JSON.parse(res.body) as { error?: unknown } | null)?.error;
+  } catch {
+    return res;
+  }
+  if (error === 'device_revoked') {
+    throw new WarrenApiError(
+      'device_revoked',
+      'this device was disconnected from another device of the account',
+      { status: 403 },
+    );
+  }
+  if (error === 'device_unregistered') {
+    throw new WarrenApiError(
+      'device_unregistered',
+      'this device is not registered with the account',
+      {
+        status: 403,
+      },
+    );
+  }
+  return res;
 }
 
 /**
@@ -281,12 +321,74 @@ export class WarrenApiClient {
   async issueTokens(req: TokenIssueRequest): Promise<TokenIssueResponse> {
     return this.json(
       this.expectOk(
-        await this.request('POST', '/v1/tokens/issue', {
-          body: JSON.stringify(req),
-          signed: true,
-        }),
+        deviceRefusal(
+          await this.request('POST', '/v1/tokens/issue', {
+            body: JSON.stringify(req),
+            signed: true,
+          }),
+        ),
       ),
     );
+  }
+
+  /**
+   * `POST /v1/devices` (signed, warren-core doc 115): registers this install
+   * with the account, or refreshes its name, version and last-seen day when
+   * the account knows it. Idempotent. The answer carries the name the
+   * registry holds, which a rename made from another device changes.
+   *
+   * @throws {WarrenApiError} `device_revoked` (403) for a device revoked from
+   * another device of the account; `device_limit_reached` (409) for a new
+   * device past the account's cap; `server` with status 404 from a server
+   * without the registry, which a client lets issuance go on past.
+   */
+  async registerDevice(registration: dto.DeviceRegistration): Promise<dto.DeviceView> {
+    const res = await this.request('POST', DEVICES_PATH, {
+      body: JSON.stringify(registration),
+      signed: true,
+    });
+    if (res.status === 409) {
+      throw new WarrenApiError(
+        'device_limit_reached',
+        'the account already has as many devices as it may',
+        { status: 409 },
+      );
+    }
+    return readDeviceView(this.json(this.expectOk(deviceRefusal(res))));
+  }
+
+  /**
+   * `GET /v1/devices` (signed): the account's active devices, and the last
+   * day an older client of the account was superseded. `thisDevice` names the
+   * calling install, so the server marks its line `this_device`. The list
+   * belongs in the account's own UI, never in a log.
+   */
+  async listDevices(thisDevice?: dto.DeviceId): Promise<dto.DeviceListResponse> {
+    const path =
+      thisDevice === undefined
+        ? DEVICES_PATH
+        : `${DEVICES_PATH}?device_id=${encodeURIComponent(thisDevice)}`;
+    const res = await this.request('GET', path, { signed: true });
+    return readDeviceList(this.json(this.expectOk(deviceRefusal(res))));
+  }
+
+  /** `PATCH /v1/devices/{id}` (signed): renames a device of the account (204). */
+  async renameDevice(id: dto.DeviceId, name: string): Promise<void> {
+    const body: dto.DeviceRename = { name };
+    this.expectOk(
+      deviceRefusal(
+        await this.request('PATCH', devicePath(id), { body: JSON.stringify(body), signed: true }),
+      ),
+    );
+  }
+
+  /**
+   * `DELETE /v1/devices/{id}` (signed): revokes a device of the account (204).
+   * Revoking this install's own device is a logout. The revoked device learns
+   * it at its next registration or issuance (`device_revoked`).
+   */
+  async revokeDevice(id: dto.DeviceId): Promise<void> {
+    this.expectOk(deviceRefusal(await this.request('DELETE', devicePath(id), { signed: true })));
   }
 
   /** A {@link TokenTransport} bound to this client, ready to hand to
@@ -295,6 +397,7 @@ export class WarrenApiClient {
     return {
       getDirectory: () => this.getTokenDirectory(),
       issue: (req) => this.issueTokens(req),
+      registerDevice: (registration) => this.registerDevice(registration),
     };
   }
 
@@ -318,12 +421,15 @@ export class WarrenApiClient {
       issue: async (req) =>
         this.json(
           this.expectOk(
-            await this.request('POST', '/v1/browser-proxy/issue', {
-              body: JSON.stringify(req),
-              signed: true,
-            }),
+            deviceRefusal(
+              await this.request('POST', '/v1/browser-proxy/issue', {
+                body: JSON.stringify(req),
+                signed: true,
+              }),
+            ),
           ),
         ),
+      registerDevice: (registration) => this.registerDevice(registration),
     };
   }
 

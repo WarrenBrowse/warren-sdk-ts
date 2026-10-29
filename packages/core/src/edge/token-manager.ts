@@ -24,7 +24,9 @@
 
 import { bytesToHex } from '@noble/hashes/utils';
 import { base64urlnopad } from '@scure/base';
+import type { DeviceRegistration, DeviceView } from '../api/dto.js';
 import { WarrenApiError } from '../api/errors.js';
+import { WarrenDeviceError } from '../device/index.js';
 import { WarrenEdgeError } from './errors.js';
 import {
   type TokenIssuerDirectory,
@@ -32,7 +34,7 @@ import {
   currentEpoch,
   mintEpoch,
 } from './token-acquire.js';
-import { TOKEN_LEN, tokenSerial } from './token.js';
+import { TOKEN_LEN, type Token, tokenSerial } from './token.js';
 
 /**
  * The issuer's once-per-account-epoch reject code. The only refusal that is
@@ -95,6 +97,21 @@ export interface TokenManagerOptions {
    * first serial.
    */
   rotation?: number;
+  /**
+   * The registered device this manager asks as (warren-core doc 115). Every
+   * {@link TokenManager.refresh} registers it first, through the transport's
+   * `registerDevice`, and names it on every issue request, which is what lets
+   * the account list it, revoke it, and supersede an older client of the
+   * wallet that holds the tokens.
+   */
+  device?: DeviceRegistration;
+  /**
+   * Called with the name the registry answered a registration with when it
+   * differs from the one this manager held: a rename made from another device
+   * of the account. Keep it with the identity (`keepDeviceName`) so the next
+   * start registers under it.
+   */
+  onDeviceName?: (name: string) => void;
 }
 
 interface PersistedBundle {
@@ -128,6 +145,11 @@ export class TokenManager {
   private readonly held = new Set<string>();
   private readonly rotation: number;
   private readonly blindingKey: Uint8Array | undefined;
+  /** The registration this manager sends, renames included. */
+  private device: DeviceRegistration | undefined;
+  private readonly onDeviceName: ((name: string) => void) | undefined;
+  /** Set once the registry or the issuer answered `device_revoked`; never cleared. */
+  private revoked = false;
 
   /**
    * `blindingKey` ({@link blindingKeyFromSeed} with the class's purpose:
@@ -140,6 +162,9 @@ export class TokenManager {
    *
    * Without a key the manager only reads its store ({@link sessionStack},
    * {@link takeCurrentStack}): {@link refresh} refuses to mint.
+   *
+   * @throws {WarrenDeviceError} `no_registrar` when `options.device` is given
+   * over a transport without `registerDevice`.
    */
   constructor(
     private readonly transport: TokenTransport,
@@ -147,9 +172,48 @@ export class TokenManager {
     blindingKey?: Uint8Array,
     options?: TokenManagerOptions,
   ) {
+    if (options?.device !== undefined && transport.registerDevice === undefined) {
+      throw new WarrenDeviceError(
+        'no_registrar',
+        'a token manager issuing as a device needs a transport that registers it',
+      );
+    }
     this.blindingKey = blindingKey === undefined ? undefined : new Uint8Array(blindingKey);
     this.rotation = options?.rotation ?? randomRotation();
+    this.device = options?.device === undefined ? undefined : { ...options.device };
+    this.onDeviceName = options?.onDeviceName;
     this.loadPersisted();
+  }
+
+  /**
+   * Whether the device this manager asks as was revoked from another device
+   * of the account. Sticky: every later {@link refresh} throws
+   * `device_revoked` without a request, and the stock is gone. The app
+   * disconnects, says "This device was disconnected from another device of
+   * your account", and forgets the device identity (`forgetDeviceIdentity`).
+   */
+  get deviceRevoked(): boolean {
+    return this.revoked;
+  }
+
+  /**
+   * The device's name as this manager last knew it: the one it was given, a
+   * rename ({@link setDeviceName}), or the one the registry answered. Keep it
+   * out of every log. `undefined` without a device.
+   */
+  deviceName(): string | undefined {
+    return this.device?.name;
+  }
+
+  /**
+   * Registers the device under `name` from the next {@link refresh} on, once
+   * the account renamed it (`WarrenApiClient.renameDevice`). The registry
+   * keeps a known device's name whatever a registration carries; this matters
+   * once it deleted the row (a device unseen for 90 days). Does nothing
+   * without a device.
+   */
+  setDeviceName(name: string): void {
+    if (this.device) this.device = { ...this.device, name };
   }
 
   /**
@@ -167,8 +231,14 @@ export class TokenManager {
    * directory fetch itself fails or carries an unusable epoch length.
    * @throws {WarrenApiError} with status `401` when the issuer refuses the
    * signature (`clock_skew` for a device clock outside its window, `server`
-   * otherwise): the pass ends there. Any other per-epoch mint refusal or
-   * transport error is swallowed and left retryable.
+   * otherwise): the pass ends there. For a manager given a device, also
+   * `device_revoked` (sticky, see {@link deviceRevoked}), `device_unregistered`
+   * when the issuer still does not know the device once it registered again,
+   * and `device_limit_reached` when the account holds as many devices as it
+   * may (not sticky: the next pass registers again). A registration that
+   * fails otherwise, a server without the registry included, lets the pass
+   * issue. Any other per-epoch mint refusal or transport error is swallowed
+   * and left retryable.
    */
   async refresh(nowUnixSecs: number): Promise<void> {
     const blindingKey = this.blindingKey;
@@ -178,6 +248,8 @@ export class TokenManager {
         'a token manager mints only from a wallet blinding key',
       );
     }
+    if (this.revoked) throw revokedError();
+    await this.registerAtStart();
     const directory = await this.transport.getDirectory();
     const current = currentEpoch(directory, nowUnixSecs);
 
@@ -192,25 +264,28 @@ export class TokenManager {
       .map((k) => k.epoch)
       .filter((epoch) => epoch >= current && !this.settled.has(epoch));
 
+    const pass = { registered: false };
     for (const epoch of targets) {
       try {
-        const tokens = await mintEpoch(
-          this.transport,
-          directory,
-          epoch,
-          directory.quota_per_epoch,
-          blindingKey,
-        );
+        const tokens = await this.mintAsDevice(directory, epoch, blindingKey, pass);
+        // A revocation answered while this batch was in flight wins: a
+        // revoked device holds nothing.
+        if (this.revoked) continue;
         this.settled.add(epoch);
         const serialized = tokens.map((t) => t.serialize());
         const existing = this.store.get(epoch);
         if (existing) existing.push(...serialized);
         else this.store.set(epoch, serialized);
       } catch (err) {
+        if (err instanceof WarrenApiError && err.code === 'device_revoked') {
+          this.revoke();
+          throw err;
+        }
         // A refused signature (a clock outside the server window, a key it
-        // does not accept) answers every epoch alike: swallowed, it would read
-        // as a refresh that went fine and stocked nothing.
-        if (err instanceof WarrenApiError && err.status === 401) {
+        // does not accept), a device the issuer still does not know, and an
+        // account at its device cap answer every epoch alike: swallowed, they
+        // would read as a refresh that went fine and stocked nothing.
+        if (err instanceof WarrenApiError && (err.status === 401 || answersEveryEpoch(err))) {
           this.persist();
           throw err;
         }
@@ -225,6 +300,79 @@ export class TokenManager {
       }
     }
     // epochSecs may change even when nothing minted, so always persist.
+    this.persist();
+  }
+
+  /**
+   * Registers the device at the start of a pass: that is how a revocation
+   * reaches a device whose epochs are all stocked, within one refresh period,
+   * and it keeps the registry's version and last-seen day current. Any
+   * failure other than a revocation or the device cap is left to the issue
+   * requests: a server without the registry answers 404 here and still issues.
+   */
+  private async registerAtStart(): Promise<void> {
+    if (this.device === undefined) return;
+    try {
+      this.adopt(await this.register(this.device));
+    } catch (err) {
+      if (!(err instanceof WarrenApiError)) return;
+      if (err.code === 'device_revoked') {
+        this.revoke();
+        throw err;
+      }
+      if (err.code === 'device_limit_reached') throw err;
+    }
+  }
+
+  /**
+   * Mints `epoch` as this manager's device, registering it and asking once
+   * more when the issuer does not know it yet (the registration that opened
+   * the pass failed, or lost a race). `pass` keeps a pass to one such retry.
+   */
+  private async mintAsDevice(
+    directory: TokenIssuerDirectory,
+    epoch: number,
+    blindingKey: Uint8Array,
+    pass: { registered: boolean },
+  ): Promise<Token[]> {
+    const device = this.device;
+    const mint = () =>
+      mintEpoch(
+        this.transport,
+        directory,
+        epoch,
+        directory.quota_per_epoch,
+        blindingKey,
+        device?.device_id,
+      );
+    try {
+      return await mint();
+    } catch (err) {
+      const unknown = err instanceof WarrenApiError && err.code === 'device_unregistered';
+      if (device === undefined || !unknown || pass.registered) throw err;
+      pass.registered = true;
+      this.adopt(await this.register(device));
+      return mint();
+    }
+  }
+
+  private register(device: DeviceRegistration): Promise<DeviceView> {
+    // The constructor refuses a device over a transport without a registrar.
+    const register = this.transport.registerDevice as NonNullable<TokenTransport['registerDevice']>;
+    return register.call(this.transport, device);
+  }
+
+  /** Takes the name the registry answered with, which carries a rename made elsewhere. */
+  private adopt(view: DeviceView): void {
+    if (this.device === undefined || this.device.name === view.name) return;
+    this.device = { ...this.device, name: view.name };
+    this.onDeviceName?.(view.name);
+  }
+
+  /** Records a revocation: the stock goes with it, since a revoked device presents nothing. */
+  private revoke(): void {
+    this.revoked = true;
+    this.store.clear();
     this.persist();
   }
 
@@ -374,6 +522,19 @@ export class TokenManager {
       if (tokens.length > 0) this.store.set(epoch, tokens);
     }
   }
+}
+
+/** The device refusals that every epoch of a pass would answer alike. */
+function answersEveryEpoch(err: WarrenApiError): boolean {
+  return err.code === 'device_unregistered' || err.code === 'device_limit_reached';
+}
+
+function revokedError(): WarrenApiError {
+  return new WarrenApiError(
+    'device_revoked',
+    'this device was disconnected from another device of the account',
+    { status: 403 },
+  );
 }
 
 /** A uniformly drawn start for {@link TokenManager.sessionStack}. */

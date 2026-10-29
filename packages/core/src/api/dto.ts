@@ -103,3 +103,69 @@ export interface IncidentPubkeyMismatchRequest {
   /** Unix epoch seconds (server overwrites). */
   tsUnix: number;
 }
+
+/**
+ * A device id: 16 random bytes as base64url without padding (warren-core doc
+ * 115). Branded so only {@link parseDeviceId} or {@link deviceIdFromBytes}
+ * make one. It names an install to its own account: keep it out of every log.
+ */
+export type DeviceId = string & { readonly __brand: 'DeviceId' };
+
+/**
+ * The platform a device runs on, as its list line shows it. `other` is how a
+ * platform this build does not know reads, so a newer server's list still
+ * parses; nothing registers as `other`.
+ */
+export type DevicePlatform =
+  | 'android'
+  | 'ios'
+  | 'macos'
+  | 'windows'
+  | 'linux'
+  | 'cli'
+  | 'browser'
+  | 'other';
+
+/** A platform a device can register as: the registry's closed set. */
+export type RegistrablePlatform = Exclude<DevicePlatform, 'other'>;
+
+/** `POST /v1/devices` (signed) request: registers the install, or refreshes it. */
+export interface DeviceRegistration {
+  device_id: DeviceId;
+  /** Generated at install time from the shared word lists, renamable. */
+  name: string;
+  platform: RegistrablePlatform;
+  /** The app version, `[0-9A-Za-z.+-]`, at most 32 characters. */
+  app_version: string;
+}
+
+/**
+ * One device of an account, as `GET /v1/devices` lists it and
+ * `POST /v1/devices` answers it. Dates are `YYYY-MM-DD` (UTC).
+ */
+export interface DeviceView {
+  device_id: DeviceId;
+  name: string;
+  platform: DevicePlatform;
+  app_version: string;
+  registered_on: string;
+  last_seen_on: string;
+  /** Whether it is the device the list was asked for. */
+  this_device: boolean;
+}
+
+/** `GET /v1/devices` (signed) response. */
+export interface DeviceListResponse {
+  /** The account's active devices. */
+  devices: DeviceView[];
+  /**
+   * The last day an older client of the account (one that does not register)
+   * had its token reservation superseded. Absent when none ever was.
+   */
+  older_client_seen_on?: string;
+}
+
+/** `PATCH /v1/devices/{device_id}` (signed) request. */
+export interface DeviceRename {
+  name: string;
+}

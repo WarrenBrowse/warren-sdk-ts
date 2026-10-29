@@ -7,6 +7,7 @@
  */
 export * from './identity/index.js';
 export * from './api/index.js';
+export * from './device/index.js';
 export * from './discovery/index.js';
 export * from './edge/index.js';
 export * from './phase.js';

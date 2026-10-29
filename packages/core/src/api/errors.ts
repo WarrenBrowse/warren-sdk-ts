@@ -19,7 +19,25 @@ export type WarrenApiErrorCode =
    * can do is set the clock right. {@link WarrenApiError.offsetSecs} says by
    * how much when the refusal carried a `Date`.
    */
-  | 'clock_skew';
+  | 'clock_skew'
+  /**
+   * The device a registration, an issuance or a device route named was
+   * revoked from another device of the account (`403
+   * {"error":"device_revoked"}`). The client disconnects and forgets its
+   * device identity; coming back takes the recovery phrase.
+   */
+  | 'device_revoked'
+  /**
+   * The device an issuance named is not registered (`403
+   * {"error":"device_unregistered"}`): register it, then ask again.
+   */
+  | 'device_unregistered'
+  /**
+   * The account already holds as many active devices as the registry takes
+   * (`409` on `POST /v1/devices`): this install is issued nothing until
+   * another device of the account is revoked.
+   */
+  | 'device_limit_reached';
 
 /**
  * A Warren API error.

@@ -29,4 +29,11 @@ export type {
   IncidentReason,
   IncidentExitDownRequest,
   IncidentPubkeyMismatchRequest,
+  DeviceId,
+  DevicePlatform,
+  RegistrablePlatform,
+  DeviceRegistration,
+  DeviceView,
+  DeviceListResponse,
+  DeviceRename,
 } from './dto.js';

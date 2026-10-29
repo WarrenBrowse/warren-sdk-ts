@@ -15,6 +15,7 @@
 
 import { bytesToHex } from '@noble/hashes/utils';
 import { base64urlnopad } from '@scure/base';
+import type { DeviceId, DeviceRegistration, DeviceView } from '../api/dto.js';
 import { WarrenEdgeError } from './errors.js';
 import { deterministicTokenRandom } from './token-blinding.js';
 import {
@@ -52,6 +53,11 @@ export interface TokenIssuerDirectory {
 /** The wallet-signed `POST /v1/tokens/issue` request body. */
 export interface TokenIssueRequest {
   epochs: { epoch: number; blinded: string[] }[];
+  /**
+   * The registered device asking (warren-core doc 115). Omitted, never null,
+   * when the client names none, so its body is the original one.
+   */
+  device_id?: DeviceId;
 }
 
 /** The `POST /v1/tokens/issue` response body. */
@@ -71,6 +77,11 @@ export interface TokenTransport {
   getDirectory(): Promise<TokenIssuerDirectory>;
   /** Wallet-signed `POST /v1/tokens/issue`. */
   issue(request: TokenIssueRequest): Promise<TokenIssueResponse>;
+  /**
+   * Wallet-signed `POST /v1/devices`, for a token manager that issues as a
+   * registered device. `WarrenApiClient`'s transports carry it.
+   */
+  registerDevice?(registration: DeviceRegistration): Promise<DeviceView>;
 }
 
 /**
@@ -127,6 +138,8 @@ export function currentEpoch(directory: TokenIssuerDirectory, nowUnixSecs: numbe
  * build the identical one. A random batch would reserve the epoch and lock the
  * wallet's other clients out of it.
  *
+ * `deviceId` names the registered device asking on the issue request.
+ *
  * @throws {WarrenEdgeError} `epoch_rejected` (carrying the issuer's
  * `rejectReason`) if the issuer refused the epoch; `token_issuer` if the
  * issuer's response is otherwise inconsistent.
@@ -137,6 +150,7 @@ export async function mintEpoch(
   epoch: number,
   count: number,
   blindingKey: Uint8Array,
+  deviceId?: DeviceId,
 ): Promise<Token[]> {
   const pk = issuerKeyForEpoch(directory, epoch);
   const wanted = Math.min(count, directory.quota_per_epoch);
@@ -156,7 +170,10 @@ export async function mintEpoch(
     states.push(state);
   }
 
-  const response = await transport.issue({ epochs: [{ epoch, blinded: blindedB64 }] });
+  const response = await transport.issue({
+    epochs: [{ epoch, blinded: blindedB64 }],
+    ...(deviceId !== undefined ? { device_id: deviceId } : {}),
+  });
   const epochResult = response.epochs.find((e) => e.epoch === epoch);
   if (!epochResult || !epochResult.issued) {
     throw new WarrenEdgeError(
