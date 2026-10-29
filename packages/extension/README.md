@@ -299,9 +299,11 @@ speaks the 4-byte little-endian stdio framing): `hello {protocol, channel?}`
 (version handshake naming the extension's channel, no identity; the answer
 carries `datapath`), `status` (the state, and while a tunnel is up its
 `endpoints` and `exit`), `connect {mnemonic, selector?, entrySelector?, daita?,
-httpProxy?}` (`entrySelector` picks the multihop entry country, always a node
-distinct from the exit; the answer carries the listener credentials and
-`exit`), `disconnect`, `exits` (the verified relay-list locations, for a location
+httpProxy?, device?}` (`entrySelector` picks the multihop entry country, always a
+node distinct from the exit; `device` is `{id, name, appVersion}`, the browser
+install's identity in the account's device registry, which the host registers
+its tunnel as; the answer carries the listener credentials and `exit`),
+`disconnect`, `exits` (the verified relay-list locations, for a location
 picker), `account {mnemonic}` (signed subscription lookup, returns
 `expiresAt`), plus unsolicited `{type: 'state'}` events. The mnemonic crosses
 only this local IPC, never a page or the network. Typed errors:
@@ -309,6 +311,17 @@ only this local IPC, never a page or the network. Typed errors:
 already_connected | not_connected | proxy_uncontrollable |
 private_browsing_required` (host-reported failures keep their own code in
 `hostCode`).
+
+The extension owns the device identity (`openDeviceIdentityStore`, kept in
+`chrome.storage.local`), because the browser-proxy tier issues with no helper
+installed: it registers it from its own token refresh (`TokenManager`'s
+`device` option, platform `browser`) and hands it to the host on every connect,
+so one browser install is one line in the account's list (warren-core doc 115).
+Both hosts keep it in their state directory under `devices/<id>.json`, one file
+per browser install. `device` is additive within version 3: an older host
+ignores it and registers nothing. A connect the registry refuses fails with the
+host code `device_revoked` (forget the identity, sign out) or `device_limit`
+(the account's device list is full).
 
 `exit` is `{country, city}`: the ISO 3166-1 alpha-2 country (upper-case) and the
 city of the exit the tunnel lands on, as the verified relay list names them.

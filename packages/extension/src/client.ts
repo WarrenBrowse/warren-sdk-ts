@@ -3,6 +3,7 @@ import { hardenBrowserLeaks, releaseBrowserLeaks } from './leaks.js';
 import {
   DEFAULT_HOST_NAME,
   EXTENSION_PROTOCOL_VERSION,
+  type ExtensionDevice,
   type ExtensionEndpoints,
   type ExtensionEntryQuery,
   type ExtensionExitLocation,
@@ -154,6 +155,11 @@ export interface BrowserVpnConnectOptions {
   split?: SplitTunnelConfig;
   /** Enables the DAITA uplink traffic-analysis defense on the tunnel. */
   daita?: boolean;
+  /**
+   * The browser install's device (`openDeviceIdentityStore`), which the host
+   * registers its tunnel as. Omit to register none.
+   */
+  device?: ExtensionDevice;
 }
 
 /** How long an explicit disconnect waits for the host to acknowledge. */
@@ -368,6 +374,7 @@ export class WarrenBrowserVpn {
         ...(options.entrySelector ? { entrySelector: options.entrySelector } : {}),
         ...(httpProxy !== undefined ? { httpProxy } : {}),
         ...(options.daita !== undefined ? { daita: options.daita } : {}),
+        ...(options.device ? { device: options.device } : {}),
       });
       if (res.type !== 'connect') {
         throw new WarrenExtensionError('protocol', 'unexpected host response to connect');

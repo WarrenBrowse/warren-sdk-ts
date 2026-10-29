@@ -1,15 +1,24 @@
 import type { Buffer } from 'node:buffer';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import process from 'node:process';
 import {
   API_BASE_URL_BY_CHANNEL,
   type ProductChannel,
   WarrenApiClient,
   apiBaseUrl,
+  encodeDeviceIdentity,
+  parseDeviceId,
   seedFromMnemonic,
   verifySignedRelayList,
 } from '@warrenbrowse/sdk-core';
-import { ProxyTunnel, type ProxyTunnelOptions, proxyDatapathStatus } from '@warrenbrowse/sdk-node';
-import type { HostRequest } from '../protocol.js';
+import {
+  ProxyTunnel,
+  type ProxyTunnelOptions,
+  fileDeviceIdentityPersistence,
+  proxyDatapathStatus,
+} from '@warrenbrowse/sdk-node';
+import type { ExtensionDevice, HostRequest } from '../protocol.js';
 import { NativeFrameDecoder, encodeNativeFrame } from './framing.js';
 import { HostSession, type HostTunnelFactory } from './session.js';
 
@@ -60,6 +69,25 @@ export async function resolveServerPin(config: NativeHostConfig, apiBase: string
 }
 
 /**
+ * Keeps the extension's device identity where the engine reads it and returns
+ * how the tunnel registers as it. One file per device id: every browser on
+ * this account of the machine runs a host over the same state directory, and
+ * each must register as its own install.
+ */
+function registerAs(
+  config: NativeHostConfig,
+  device: ExtensionDevice,
+): NonNullable<ProxyTunnelOptions['device']> {
+  const id = parseDeviceId(device.id);
+  const root = config.stateDir ?? join(homedir(), '.config', 'warren');
+  const identityPath = join(root, 'devices', `${id}.json`);
+  fileDeviceIdentityPersistence(identityPath).save(
+    encodeDeviceIdentity({ deviceId: id, name: device.name }),
+  );
+  return { identityPath, platform: 'browser', appVersion: device.appVersion };
+}
+
+/**
  * Builds the host's tunnels on the in-process engine (`ProxyTunnel`), whose
  * connect names the exit the tunnel lands on for the session to report.
  * `nativeFactory` replaces the addon at its boundary, for tests.
@@ -78,6 +106,7 @@ export function hostTunnelFactory(
       ...(init?.daita !== undefined ? { daita: init.daita } : {}),
       ...(config.multihopRootPinHex ? { multihopRootPinHex: config.multihopRootPinHex } : {}),
       ...(config.stateDir ? { stateDir: config.stateDir } : {}),
+      ...(init?.device ? { device: registerAs(config, init.device) } : {}),
       ...(nativeFactory ? { nativeFactory } : {}),
       onState: (state) => onState(state),
     });

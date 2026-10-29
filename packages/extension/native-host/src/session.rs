@@ -10,8 +10,8 @@ use warren_sdk::product::Channel;
 use zeroize::Zeroizing;
 
 use crate::protocol::{
-    self, ConnectRequest, Endpoints, EntryQuery, Envelope, ExitLocation, ExitQuery, HostState,
-    PROTOCOL_VERSION, Request, TunnelExit,
+    self, ConnectRequest, DeviceHandoff, Endpoints, EntryQuery, Envelope, ExitLocation, ExitQuery,
+    HostState, PROTOCOL_VERSION, Request, TunnelExit,
 };
 
 /// The stable codes an error answer carries, spelled as the Node host spells
@@ -45,6 +45,12 @@ pub enum ErrorCode {
     Response,
     /// The system clock is before the Unix epoch.
     BadClock,
+    /// The device was revoked from another device of the account
+    /// (warren-core doc 115): the extension disconnects and forgets it.
+    DeviceRevoked,
+    /// The account holds as many devices as it may: this install is issued
+    /// nothing until another one is revoked.
+    DeviceLimit,
 }
 
 impl ErrorCode {
@@ -65,6 +71,8 @@ impl ErrorCode {
             Self::AllHostsBlocked => "all_hosts_blocked",
             Self::Response => "response",
             Self::BadClock => "bad_clock",
+            Self::DeviceRevoked => "device_revoked",
+            Self::DeviceLimit => "device_limit",
         }
     }
 }
@@ -97,12 +105,14 @@ pub type Outbox = Arc<dyn Fn(Value) + Send + Sync>;
 pub type StateSink = Arc<dyn Fn(HostState) + Send + Sync>;
 
 /// Tunnel options that cannot wait for connect.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TunnelInit {
     /// DAITA on the tunnel, when the extension said.
     pub daita: Option<bool>,
     /// The channel the extension named at hello, if it did.
     pub channel: Option<Channel>,
+    /// The device the tunnel registers as, when the extension named one.
+    pub device: Option<DeviceHandoff>,
 }
 
 /// Per-connect options.
@@ -248,7 +258,7 @@ impl<B: HostBackend> HostSession<B> {
                 drop(inner);
                 self.send(answer);
             }
-            Request::Connect(request) => self.connect(&id, request).await,
+            Request::Connect(request) => self.connect(&id, *request).await,
             Request::Disconnect => {
                 self.teardown().await;
                 self.send(protocol::disconnect_answer(&id));
@@ -319,8 +329,13 @@ impl<B: HostBackend> HostSession<B> {
             entry_selector,
             http_proxy,
             daita,
+            device,
         } = request;
-        let init = TunnelInit { daita, channel };
+        let init = TunnelInit {
+            daita,
+            channel,
+            device,
+        };
         let options = ConnectOptions {
             selector,
             entry_selector,
@@ -661,8 +676,8 @@ mod tests {
         assert_eq!(
             lock(&h.seen.inits)[0],
             TunnelInit {
-                daita: None,
-                channel: Some(Channel::Beta)
+                channel: Some(Channel::Beta),
+                ..TunnelInit::default()
             }
         );
     }
@@ -884,6 +899,32 @@ mod tests {
             })
         );
         assert_eq!(seen.http_proxy, Some(true));
+    }
+
+    #[tokio::test]
+    async fn registers_the_tunnel_as_the_device_the_extension_names() {
+        let h = Harness::new(Fake::default());
+        h.send(json!({
+            "id": 13, "type": "connect", "mnemonic": M,
+            "device": { "id": "AAECAwQFBgcICQoLDA0ODw", "name": "calm heron", "appVersion": "0.1.8" }
+        }))
+        .await;
+        let device = lock(&h.seen.inits)[0].device.clone().expect("a device");
+        assert_eq!(String::from(device.id), "AAECAwQFBgcICQoLDA0ODw");
+        assert_eq!(device.name, "calm heron");
+        assert_eq!(device.app_version, "0.1.8");
+    }
+
+    #[tokio::test]
+    async fn refuses_a_malformed_device_before_any_tunnel() {
+        let h = Harness::new(Fake::default());
+        h.send(json!({
+            "id": 14, "type": "connect", "mnemonic": M,
+            "device": { "id": "AAECAwQFBgcICQoLDA0ODw", "name": " ", "appVersion": "0.1.8" }
+        }))
+        .await;
+        assert!(lock(&h.seen.inits).is_empty());
+        assert_eq!(h.last()["code"], json!("protocol"));
     }
 
     #[tokio::test]

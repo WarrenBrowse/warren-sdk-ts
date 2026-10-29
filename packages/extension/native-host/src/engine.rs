@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use warren_sdk::api::{ClientError, HttpTransport};
+use warren_sdk::api::{ClientError, DeviceIdentity, DevicePlatform, HttpTransport};
 use warren_sdk::discovery::{CircuitPolicy, PathQualityAdvisory, VerifiedEntry, VerifiedExit};
 use warren_sdk::identity::WarrenIdentity;
 use warren_sdk::net::ProxyConfig;
@@ -18,7 +18,9 @@ use warren_sdk::{
 };
 use zeroize::Zeroizing;
 
-use crate::protocol::{Endpoints, EntryQuery, ExitLocation, ExitQuery, HostState, TunnelExit};
+use crate::protocol::{
+    DeviceHandoff, Endpoints, EntryQuery, ExitLocation, ExitQuery, HostState, TunnelExit,
+};
 use crate::session::{
     ConnectOptions, ErrorCode, HostBackend, HostError, HostTunnel, Listeners, StateSink,
     TunnelInit, TunnelRoute,
@@ -54,6 +56,14 @@ pub fn map_client_error(e: &ClientError) -> HostError {
         ClientError::BadClock => {
             HostError::new(ErrorCode::BadClock, "system clock is before the Unix epoch")
         }
+        ClientError::DeviceRevoked => HostError::new(
+            ErrorCode::DeviceRevoked,
+            "this device was disconnected from another device of the account",
+        ),
+        ClientError::DeviceLimitReached => HostError::new(
+            ErrorCode::DeviceLimit,
+            "the account already has as many devices as it may",
+        ),
         _ => HostError::new(ErrorCode::Transport, "the API request failed"),
     }
 }
@@ -66,6 +76,9 @@ pub fn map_sdk_error(e: &SdkError) -> HostError {
     match e {
         SdkError::Api(ClientError::ServerStatus { status, .. }) => {
             HostError::new(ErrorCode::Api, format!("server returned status {status}"))
+        }
+        SdkError::Api(inner @ (ClientError::DeviceRevoked | ClientError::DeviceLimitReached)) => {
+            map_client_error(inner)
         }
         SdkError::Api(inner) => HostError::new(ErrorCode::Api, map_client_error(inner).message),
         SdkError::Discovery(_)
@@ -209,6 +222,40 @@ impl EngineBackend {
     }
 }
 
+/// Keeps the extension's device identity where the engine reads it, and
+/// registers the tunnel as that device.
+///
+/// One file per device id under the channel's state directory: every browser
+/// on this account of the machine runs this helper over one state root, and
+/// each must register as its own install. The file is written whole (a side
+/// file renamed over it), in the SDK's format.
+fn register_as(
+    builder: WarrenClientBuilder,
+    channel_dir: &std::path::Path,
+    device: DeviceHandoff,
+) -> Result<WarrenClientBuilder, HostError> {
+    let unusable = |_| {
+        HostError::new(
+            ErrorCode::Config,
+            "the helper state directory is not usable",
+        )
+    };
+    let dir = channel_dir.join("devices");
+    std::fs::create_dir_all(&dir).map_err(unusable)?;
+    let path = dir.join(format!("{}.json", String::from(device.id)));
+    let identity = DeviceIdentity {
+        device_id: device.id,
+        name: device.name,
+    };
+    let json = serde_json::to_vec(&identity)
+        .map_err(|_| HostError::new(ErrorCode::Config, "the device identity could not be kept"))?;
+    let partial = path.with_extension("json.partial");
+    std::fs::write(&partial, json)
+        .and_then(|()| std::fs::rename(&partial, &path))
+        .map_err(unusable)?;
+    Ok(builder.device(path, DevicePlatform::Browser, device.app_version))
+}
+
 fn identity_from(mnemonic: &Zeroizing<String>) -> Result<WarrenIdentity, HostError> {
     WarrenIdentity::from_mnemonic(mnemonic.trim())
         .map_err(|_| HostError::new(ErrorCode::Identity, "invalid mnemonic"))
@@ -231,9 +278,13 @@ impl HostBackend for EngineBackend {
     ) -> Result<EngineTunnel, HostError> {
         let identity = identity_from(&mnemonic)?;
         drop(mnemonic);
-        let mut builder = self.client(identity, effective_channel(init.channel))?;
+        let channel = effective_channel(init.channel);
+        let mut builder = self.client(identity, channel)?;
         if init.daita.unwrap_or(false) {
             builder = builder.daita();
+        }
+        if let Some(device) = init.device {
+            builder = register_as(builder, &self.state_root.join(channel.name()), device)?;
         }
         Ok(EngineTunnel {
             client: Arc::new(build(builder)?),
@@ -669,6 +720,73 @@ mod tests {
         assert_eq!(account.err().map(|e| e.code), Some(ErrorCode::Identity));
     }
 
+    fn handoff(id: &str) -> DeviceHandoff {
+        DeviceHandoff {
+            id: warren_sdk::api::DeviceId::try_from(id.to_owned()).expect("a device id"),
+            name: "calm heron".into(),
+            app_version: "0.1.8".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn registers_the_tunnel_as_the_device_the_extension_owns() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = EngineBackend::new(dir.path().to_path_buf());
+        let (_identity, phrase) = WarrenIdentity::generate();
+        let init = TunnelInit {
+            channel: Some(Channel::Beta),
+            device: Some(handoff("AAECAwQFBgcICQoLDA0ODw")),
+            ..TunnelInit::default()
+        };
+
+        let tunnel = backend
+            .create_tunnel(Zeroizing::new(phrase), Arc::new(|_| {}), init)
+            .await
+            .map_err(|e| e.message)
+            .expect("a tunnel builds offline");
+
+        let kept = dir.path().join("beta/devices/AAECAwQFBgcICQoLDA0ODw.json");
+        let identity = warren_sdk::kept_device_identity(&kept);
+        assert_eq!(String::from(identity.device_id), "AAECAwQFBgcICQoLDA0ODw");
+        assert_eq!(identity.name, "calm heron");
+        assert_eq!(tunnel.client.device_id(), Some(identity.device_id));
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_without_a_device_registers_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = EngineBackend::new(dir.path().to_path_buf());
+        let (_identity, phrase) = WarrenIdentity::generate();
+
+        let tunnel = backend
+            .create_tunnel(
+                Zeroizing::new(phrase),
+                Arc::new(|_| {}),
+                TunnelInit::default(),
+            )
+            .await
+            .map_err(|e| e.message)
+            .expect("a tunnel builds offline");
+
+        assert_eq!(tunnel.client.device_id(), None);
+    }
+
+    #[test]
+    fn a_device_refusal_crosses_as_its_own_code() {
+        assert_eq!(
+            map_sdk_error(&SdkError::Api(ClientError::DeviceRevoked)).code,
+            ErrorCode::DeviceRevoked
+        );
+        assert_eq!(
+            map_sdk_error(&SdkError::Api(ClientError::DeviceLimitReached)).code,
+            ErrorCode::DeviceLimit
+        );
+        assert_eq!(
+            map_client_error(&ClientError::DeviceRevoked).code,
+            ErrorCode::DeviceRevoked
+        );
+    }
+
     #[tokio::test]
     async fn keeps_each_channels_floors_in_its_own_directory() {
         let dir = tempfile::tempdir().unwrap();
@@ -678,8 +796,8 @@ mod tests {
         let sink: StateSink = Arc::new(|_| {});
         for channel in [Channel::Beta, Channel::Prod] {
             let init = TunnelInit {
-                daita: None,
                 channel: Some(channel),
+                ..TunnelInit::default()
             };
             backend
                 .create_tunnel(Zeroizing::new(phrase.clone()), Arc::clone(&sink), init)

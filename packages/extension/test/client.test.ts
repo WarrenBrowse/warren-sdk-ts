@@ -252,6 +252,21 @@ describe('WarrenBrowserVpn.connect', () => {
     const connectReq = seen.find((r) => r.type === 'connect');
     expect(connectReq).toMatchObject({ type: 'connect', mnemonic: 'twelve secret words here' });
   });
+
+  it('hands the host the device the tunnel registers as, and none when not given', async () => {
+    const device = { id: 'AAECAwQFBgcICQoLDA0ODw', name: 'calm heron', appVersion: '0.1.8' };
+    const seen: HostRequest[] = [];
+    for (const options of [{ mnemonic: 'm', device }, { mnemonic: 'm' }]) {
+      const { chrome } = fakeChrome((req, port) => {
+        seen.push(req);
+        healthyHost(req, port);
+      });
+      await new WarrenBrowserVpn({ chrome }).connect(options);
+    }
+    const [named, bare] = seen.filter((r) => r.type === 'connect');
+    expect(named).toMatchObject({ device });
+    expect(bare).not.toHaveProperty('device');
+  });
 });
 
 describe('WarrenBrowserVpn proxy control and leak hardening', () => {

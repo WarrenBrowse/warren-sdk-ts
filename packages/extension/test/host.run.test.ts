@@ -1,5 +1,10 @@
+import { mkdtempSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { parseDeviceIdentity } from '@warrenbrowse/sdk-core';
 import type {
   NativeProxyEndpoints,
+  NativeProxyOptions,
   NativeWarrenProxy,
   ProxyFatalCause,
   ProxyMetrics,
@@ -48,6 +53,45 @@ async function hostOver(reported: NativeProxyEndpoints): Promise<HostMessage[]> 
 }
 
 describe('the Node host tunnel factory', () => {
+  it('keeps the extension device where the engine registers it, as a browser', async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), 'warren-host-'));
+    let handed: NativeProxyOptions | null = null;
+    const session = new HostSession({
+      createTunnel: hostTunnelFactory({ serverPubkeyPin: '00'.repeat(32), stateDir }, (options) => {
+        handed = options;
+        return new ReportingNative(LISTENER);
+      }),
+      send: () => undefined,
+    });
+    const device = { id: 'AAECAwQFBgcICQoLDA0ODw', name: 'calm heron', appVersion: '0.1.8' };
+
+    await session.handle({ id: 1, type: 'connect', mnemonic: 'test mnemonic', device });
+
+    const identityPath = join(stateDir, 'devices', 'AAECAwQFBgcICQoLDA0ODw.json');
+    expect(handed).toMatchObject({
+      device: { identityPath, platform: 'browser', appVersion: '0.1.8' },
+    });
+    expect(parseDeviceIdentity(readFileSync(identityPath, 'utf8'))).toEqual({
+      deviceId: 'AAECAwQFBgcICQoLDA0ODw',
+      name: 'calm heron',
+    });
+  });
+
+  it('registers no device for an extension that names none', async () => {
+    let handed: NativeProxyOptions | null = null;
+    const session = new HostSession({
+      createTunnel: hostTunnelFactory({ serverPubkeyPin: '00'.repeat(32) }, (options) => {
+        handed = options;
+        return new ReportingNative(LISTENER);
+      }),
+      send: () => undefined,
+    });
+
+    await session.handle({ id: 1, type: 'connect', mnemonic: 'test mnemonic' });
+
+    expect(handed).toBeNull();
+  });
+
   it('hands the exit the engine names to the connect and status answers', async () => {
     const exit = { country: 'RO', city: 'Bucharest' };
     const [connected, status] = await hostOver({ ...LISTENER, exit });

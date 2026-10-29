@@ -60,7 +60,7 @@ function makeSession(
   } = {},
 ) {
   const sent: HostMessage[] = [];
-  let seenInit: { daita?: boolean; channel?: ProductChannel } | undefined;
+  let seenInit: Parameters<HostTunnelFactory>[2];
   const factory: HostTunnelFactory = async (mnemonic, onState, init) => {
     tunnel.seenMnemonic = mnemonic;
     tunnel.onStateCb = onState;
@@ -254,6 +254,30 @@ describe('HostSession', () => {
       entrySelector: { country: 'NL' },
     });
     expect(tunnel.seenConnect).toMatchObject({ entrySelector: { country: 'NL' } });
+  });
+
+  it('registers the tunnel as the device the extension names', async () => {
+    const { session, seenInit } = makeSession();
+    const device = { id: 'AAECAwQFBgcICQoLDA0ODw', name: 'calm heron', appVersion: '0.1.8' };
+
+    await session.handle({ id: 13, type: 'connect', mnemonic: M, device });
+
+    expect(seenInit()?.device).toEqual(device);
+  });
+
+  it('refuses a malformed device before any tunnel', async () => {
+    for (const device of [
+      { id: 'AAECAwQFBgcICQoLDA0O', name: 'calm heron', appVersion: '0.1.8' },
+      { id: 'AAECAwQFBgcICQoLDA0ODw', name: ' ', appVersion: '0.1.8' },
+      { id: 'AAECAwQFBgcICQoLDA0ODw', name: 'calm heron', appVersion: '' },
+    ]) {
+      const { session, sent, seenInit } = makeSession();
+
+      await session.handle({ id: 14, type: 'connect', mnemonic: M, device });
+
+      expect(seenInit(), JSON.stringify(device)).toBeUndefined();
+      expect(sent.at(-1)).toMatchObject({ id: 14, ok: false, code: 'protocol' });
+    }
   });
 
   it('passes the DAITA flag through to the tunnel factory', async () => {

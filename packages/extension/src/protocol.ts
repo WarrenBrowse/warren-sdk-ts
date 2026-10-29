@@ -26,6 +26,16 @@
  * behind the Warren desktop app's system tunnel, which already carries the
  * browser, and `exit` then names that tunnel's exit (or is absent when
  * unknown), never the one the host had dialled. Additive in the same way.
+ *
+ * The connect request may carry `device`: the browser install's identity in
+ * the account's device registry (warren-core doc 115), which the extension
+ * owns and keeps. The host registers its tunnel as that device, so one browser
+ * install is one line in the account's list whichever tier carries it. Also
+ * additive: an older host ignores it and registers nothing, and a newer host
+ * registers nothing for an extension that sends none. A malformed one is
+ * refused with `protocol`. A connect the registry refuses fails with the code
+ * `device_revoked` (the extension forgets its identity and signs out) or
+ * `device_limit` (the account's device list is full).
  */
 import type { ProductChannel } from '@warrenbrowse/sdk-core';
 
@@ -34,6 +44,17 @@ export const EXTENSION_PROTOCOL_VERSION = 3;
 
 /** Default native messaging host name the browser resolves to the local binary. */
 export const DEFAULT_HOST_NAME = 'com.warrenbrowse.host';
+
+/**
+ * The browser install's device, handed to the host on connect. `id` is a
+ * device id (16 bytes, base64url without padding), `name` the generated or
+ * renamed name, `appVersion` the extension's version. Never logged.
+ */
+export interface ExtensionDevice {
+  id: string;
+  name: string;
+  appVersion: string;
+}
 
 /** Tunnel lifecycle states relayed from the host (superset of the engine's). */
 export type ExtensionVpnState =
@@ -123,6 +144,8 @@ export type HostRequest =
       httpProxy?: boolean;
       /** Enables the DAITA uplink traffic-analysis defense on the tunnel. */
       daita?: boolean;
+      /** The device the tunnel registers as; omit to register none. */
+      device?: ExtensionDevice;
     }
   | { id: number; type: 'disconnect' }
   | { id: number; type: 'exits' }

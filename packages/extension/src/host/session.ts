@@ -1,6 +1,7 @@
-import type { ProductChannel } from '@warrenbrowse/sdk-core';
+import { type ProductChannel, parseDeviceId } from '@warrenbrowse/sdk-core';
 import {
   EXTENSION_PROTOCOL_VERSION,
+  type ExtensionDevice,
   type ExtensionEndpoints,
   type ExtensionExitLocation,
   type ExtensionProxyAuth,
@@ -26,6 +27,20 @@ function isChannel(value: unknown): value is ProductChannel {
   return value === 'prod' || value === 'beta';
 }
 
+/** Whether `value` is a device the registry can take: a device id, a name and a version. */
+function isDevice(value: unknown): value is ExtensionDevice {
+  if (typeof value !== 'object' || value === null) return false;
+  const { id, name, appVersion } = value as Record<string, unknown>;
+  if (typeof name !== 'string' || name.trim().length === 0) return false;
+  if (typeof appVersion !== 'string' || appVersion.trim().length === 0) return false;
+  try {
+    parseDeviceId(String(id));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Whether a value is a credential a listener can carry: a non-empty string. */
 function isCredential(value: unknown): value is string {
   return typeof value === 'string' && value.length > 0;
@@ -40,7 +55,7 @@ export type HostTunnelFactory = (
   mnemonic: string,
   onState: (state: string) => void,
   /** Tunnel-creation options that cannot wait for connect (engine-level). */
-  init?: { daita?: boolean; channel?: ProductChannel },
+  init?: { daita?: boolean; channel?: ProductChannel; device?: ExtensionDevice },
 ) => Promise<HostTunnel>;
 
 /** Options for {@link HostSession}. */
@@ -157,6 +172,10 @@ export class HostSession {
       this.fail(request.id, 'already_connected', 'a session is already up');
       return;
     }
+    if (request.device !== undefined && !isDevice(request.device)) {
+      this.fail(request.id, 'protocol', 'malformed device');
+      return;
+    }
     this.connecting = true;
     let tunnel: HostTunnel | undefined;
     try {
@@ -169,6 +188,7 @@ export class HostSession {
         {
           ...(request.daita !== undefined ? { daita: request.daita } : {}),
           ...(this.channel ? { channel: this.channel } : {}),
+          ...(request.device ? { device: request.device } : {}),
         },
       );
       const reported = await tunnel.connect({

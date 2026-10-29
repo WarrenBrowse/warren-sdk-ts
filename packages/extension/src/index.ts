@@ -28,6 +28,7 @@ export {
   EXTENSION_PROTOCOL_VERSION,
   parseHostMessage,
   parseTunnelExit,
+  type ExtensionDevice,
   type ExtensionEndpoints,
   type ExtensionExitLocation,
   type ExtensionEntryQuery,
@@ -99,6 +100,12 @@ export {
   type BrowserSettingLike,
   type PrivacyNetworkLike,
 } from './leaks.js';
+export {
+  DEVICE_IDENTITY_KEY,
+  openDeviceIdentityStore,
+  type DeviceIdentityStorageArea,
+  type DeviceIdentityStore,
+} from './device-store.js';
 export {
   BROWSER_PROXY_BUNDLE_KEY,
   TOKEN_BUNDLE_KEY,
