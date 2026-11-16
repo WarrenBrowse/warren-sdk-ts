@@ -21,10 +21,12 @@ import {
 import {
   DEFAULT_SPLIT,
   FAIL_CLOSED_PROXY,
+  type FirefoxRequestDetails,
   type SplitTunnelConfig,
   buildChromiumLockdownValue,
   buildChromiumProxyValue,
   buildFirefoxProxyValue,
+  pageHostOf,
   shouldTunnelRequest,
 } from './split.js';
 
@@ -70,10 +72,10 @@ export interface ChromeSettingLike {
 /** A Firefox `proxy.onRequest` event, used for per-host `only` split tunneling. */
 export interface ProxyOnRequestLike {
   addListener(
-    callback: (request: { url: string; tabId?: number }) => unknown,
+    callback: (request: FirefoxRequestDetails) => unknown,
     filter?: { urls: string[] },
   ): void;
-  removeListener(callback: (request: { url: string; tabId?: number }) => unknown): void;
+  removeListener(callback: (request: FirefoxRequestDetails) => unknown): void;
 }
 
 /** The subset of the chrome extension API the client drives (injectable in tests). */
@@ -254,7 +256,7 @@ export class WarrenBrowserVpn {
   private releasing = false;
   private readonly hostLostListeners: Array<() => void> = [];
   private nextId = 1;
-  private onRequestHandler: ((request: { url: string; tabId?: number }) => unknown) | undefined;
+  private onRequestHandler: ((request: FirefoxRequestDetails) => unknown) | undefined;
   private readonly pending = new Map<
     number,
     { resolve: (r: HostResponse) => void; reject: (e: Error) => void }
@@ -663,9 +665,11 @@ export class WarrenBrowserVpn {
       host: socks5.slice(0, sep),
       port: Number(socks5.slice(sep + 1)),
     };
-    const handler = (request: { url: string; tabId?: number }): unknown => {
+    const handler = (request: FirefoxRequestDetails): unknown => {
       const host = new URL(request.url).hostname;
-      if (!shouldTunnelRequest({ host, tabId: request.tabId }, split)) return { type: 'direct' };
+      if (!shouldTunnelRequest({ host, pageHost: pageHostOf(request) }, split)) {
+        return { type: 'direct' };
+      }
       // Read per request: once the host is gone its port is anyone's to take,
       // and the request stalls instead of reaching it.
       const auth = this.forListener(socks5);

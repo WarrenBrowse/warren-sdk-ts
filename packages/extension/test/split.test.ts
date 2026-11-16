@@ -4,6 +4,7 @@ import {
   buildChromiumProxyValue,
   buildFirefoxProxyValue,
   hostMatchesRule,
+  pageHostOf,
   shouldTunnelHost,
   shouldTunnelRequest,
 } from '../src/split.js';
@@ -63,21 +64,74 @@ describe('shouldTunnelHost', () => {
 });
 
 describe('shouldTunnelRequest', () => {
-  it('only mode tunnels every request of a listed tab, whatever its host', () => {
-    const cfg: SplitTunnelConfig = { mode: 'only', rules: [], tabs: [7] };
-    expect(shouldTunnelRequest({ host: 'cdn.example', tabId: 7 }, cfg)).toBe(true);
-    expect(shouldTunnelRequest({ host: 'cdn.example', tabId: 8 }, cfg)).toBe(false);
-    expect(shouldTunnelRequest({ host: 'cdn.example' }, cfg)).toBe(false);
+  const PAGES: SplitTunnelConfig = { mode: 'only', rules: ['video.example'], pageResources: true };
+
+  it('tunnels what a page of a listed site loads, whatever its host, with page resources on', () => {
+    expect(shouldTunnelRequest({ host: 'cdn.example', pageHost: 'www.video.example' }, PAGES)).toBe(
+      true,
+    );
+    expect(shouldTunnelRequest({ host: 'cdn.example', pageHost: 'news.example' }, PAGES)).toBe(
+      false,
+    );
+    expect(shouldTunnelRequest({ host: 'cdn.example' }, PAGES)).toBe(false);
   });
 
-  it('keeps loopback direct even inside a listed tab', () => {
-    const cfg: SplitTunnelConfig = { mode: 'only', rules: [], tabs: [7] };
-    expect(shouldTunnelRequest({ host: 'localhost', tabId: 7 }, cfg)).toBe(false);
+  it('sends the third-party requests of a listed page direct without page resources', () => {
+    const cfg: SplitTunnelConfig = { mode: 'only', rules: ['video.example'] };
+    expect(shouldTunnelRequest({ host: 'cdn.example', pageHost: 'video.example' }, cfg)).toBe(
+      false,
+    );
+    expect(shouldTunnelRequest({ host: 'video.example' }, cfg)).toBe(true);
   });
 
-  it('still honours the host rules beside the tabs', () => {
-    const cfg: SplitTunnelConfig = { mode: 'only', rules: ['work.example'], tabs: [7] };
-    expect(shouldTunnelRequest({ host: 'work.example', tabId: 3 }, cfg)).toBe(true);
+  it('keeps loopback direct even from a listed page', () => {
+    expect(shouldTunnelRequest({ host: 'localhost', pageHost: 'video.example' }, PAGES)).toBe(
+      false,
+    );
+  });
+
+  it('leaves bypass mode to the host rules', () => {
+    const cfg: SplitTunnelConfig = { mode: 'bypass', rules: ['bank.example'], pageResources: true };
+    expect(shouldTunnelRequest({ host: 'cdn.example', pageHost: 'bank.example' }, cfg)).toBe(true);
+    expect(shouldTunnelRequest({ host: 'bank.example', pageHost: 'news.example' }, cfg)).toBe(
+      false,
+    );
+  });
+});
+
+describe('pageHostOf', () => {
+  // Shapes recorded from Firefox 156's proxy.onRequest: the frame ancestors
+  // list the immediate parent first and the top-level page last.
+  const TOP = 'https://www.video.example/watch';
+
+  it('names the top-level page of a request made inside nested frames', () => {
+    expect(
+      pageHostOf({
+        url: 'https://cdn.example/a.png',
+        type: 'image',
+        documentUrl: 'https://inner.example/frame.html',
+        frameAncestors: [{ url: 'https://embed.example/player' }, { url: TOP }],
+      }),
+    ).toBe('www.video.example');
+  });
+
+  it('names the document itself for a request of the top-level page', () => {
+    expect(
+      pageHostOf({ url: 'https://cdn.example/a.js', documentUrl: TOP, frameAncestors: [] }),
+    ).toBe('www.video.example');
+  });
+
+  it('names no page for a top-level navigation, which leaves the page it comes from', () => {
+    expect(
+      pageHostOf({ url: 'https://news.example/', type: 'main_frame', documentUrl: TOP }),
+    ).toBeUndefined();
+  });
+
+  it('names no page for a request outside any document, or with an unreadable one', () => {
+    expect(pageHostOf({ url: 'https://cdn.example/a.js' })).toBeUndefined();
+    expect(
+      pageHostOf({ url: 'https://cdn.example/a.js', documentUrl: 'not a url' }),
+    ).toBeUndefined();
   });
 });
 

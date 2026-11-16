@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   FAIL_CLOSED_PROXY,
+  type FirefoxRequestDetails,
   type IngressEndpoint,
   type LockdownState,
   type MultihopRoutingState,
@@ -436,14 +437,14 @@ describe('firefoxProxyInfoFor', () => {
 describe('attachFirefoxRouting', () => {
   function fakeProxyApi() {
     const rec: {
-      listener?: (r: { url: string; tabId?: number }) => unknown;
+      listener?: (r: FirefoxRequestDetails) => unknown;
       errors: unknown[];
     } = { errors: [] };
     return {
       rec,
       proxy: {
         onRequest: {
-          addListener: (listener: (r: { url: string; tabId?: number }) => unknown) => {
+          addListener: (listener: (r: FirefoxRequestDetails) => unknown) => {
             rec.listener = listener;
           },
         },
@@ -482,17 +483,23 @@ describe('attachFirefoxRouting', () => {
     expect(await rec.listener?.({ url: 'https://example.com/' })).not.toEqual({ type: 'direct' });
   });
 
-  it('tunnels every request of a listed tab and nothing else in only mode', async () => {
+  it('tunnels what a page of a listed site loads, and nothing else, in only mode', async () => {
     const { proxy, rec } = fakeProxyApi();
     const store = memoryRoutingStore();
     attachFirefoxRouting(proxy, store, provider);
-    await store.save({ ...STATE, split: { mode: 'only', rules: [], tabs: [7] } });
-    expect(await rec.listener?.({ url: 'https://cdn.example/a.js', tabId: 7 })).toEqual(
+    await store.save({
+      ...STATE,
+      split: { mode: 'only', rules: ['video.example'], pageResources: true },
+    });
+    const fromPage = (documentUrl: string) => ({
+      url: 'https://cdn.example/a.js',
+      documentUrl,
+      frameAncestors: [],
+    });
+    expect(await rec.listener?.(fromPage('https://video.example/watch'))).toEqual(
       firefoxProxyInfoFor(HTTPS, CREDENTIAL),
     );
-    expect(await rec.listener?.({ url: 'https://cdn.example/a.js', tabId: 8 })).toEqual({
-      type: 'direct',
-    });
+    expect(await rec.listener?.(fromPage('https://news.example/'))).toEqual({ type: 'direct' });
   });
 
   it('fails closed when its own store cannot be read', async () => {

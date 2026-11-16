@@ -53,8 +53,10 @@ export {
   buildChromiumProxyValue,
   buildFirefoxProxyValue,
   hostMatchesRule,
+  pageHostOf,
   shouldTunnelHost,
   shouldTunnelRequest,
+  type FirefoxRequestDetails,
   type SplitTunnelConfig,
   type SplitTunnelMode,
 } from './split.js';

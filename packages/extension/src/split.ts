@@ -15,11 +15,23 @@ export interface SplitTunnelConfig {
   mode: SplitTunnelMode;
   rules: string[];
   /**
-   * Browser tab ids whose every request follows the tunnel in `only` mode,
-   * third-party hosts included. Firefox alone tells a request's tab; Chromium
-   * routes through `chrome.proxy`, which never sees one, and ignores them.
+   * In `only` mode, every request a page of a listed site makes follows the
+   * tunnel too, third-party hosts included (CDNs, embedded frames, APIs).
+   * Firefox alone tells a request's page; Chromium routes through a PAC
+   * script, which sees only the URL, and ignores it.
    */
-  tabs?: number[];
+  pageResources?: boolean;
+}
+
+/** The part of a Firefox `proxy.onRequest` details object routing reads. */
+export interface FirefoxRequestDetails {
+  url: string;
+  type?: string;
+  /** The document the resource loads into. */
+  documentUrl?: string;
+  /** The frames above that document, the immediate parent first and the
+   * top-level page last; empty for a request of the top-level page. */
+  frameAncestors?: { url: string }[];
 }
 
 /** The default: tunnel all traffic. */
@@ -90,21 +102,35 @@ export function shouldTunnelHost(host: string, config: SplitTunnelConfig): boole
   }
 }
 
-/** Whether a request from `tabId` (when the browser says) to `host` should
- * follow the tunnel under `config`. */
+/** Whether a request to `host`, made by a page on `pageHost` when the browser
+ * says, should follow the tunnel under `config`. */
 export function shouldTunnelRequest(
-  request: { host: string; tabId?: number | undefined },
+  request: { host: string; pageHost?: string | undefined },
   config: SplitTunnelConfig,
 ): boolean {
   if (isLoopback(request.host)) return false;
   if (
     config.mode === 'only' &&
-    request.tabId !== undefined &&
-    config.tabs?.includes(request.tabId) === true
+    config.pageResources === true &&
+    request.pageHost !== undefined &&
+    config.rules.some((rule) => hostMatchesRule(request.pageHost as string, rule))
   ) {
     return true;
   }
   return shouldTunnelHost(request.host, config);
+}
+
+/** The host of the top-level page a Firefox request belongs to, if any. A
+ * top-level navigation belongs to the page it opens, not the one it leaves. */
+export function pageHostOf(request: FirefoxRequestDetails): string | undefined {
+  if (request.type === 'main_frame') return undefined;
+  const page = request.frameAncestors?.at(-1)?.url ?? request.documentUrl;
+  if (page === undefined) return undefined;
+  try {
+    return new URL(page).hostname.toLowerCase();
+  } catch {
+    return undefined;
+  }
 }
 
 function parseAddress(address: string): { host: string; port: number } {

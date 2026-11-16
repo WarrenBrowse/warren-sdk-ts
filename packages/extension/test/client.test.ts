@@ -2,6 +2,7 @@ import { productChannel } from '@warrenbrowse/sdk-core';
 import { describe, expect, it, vi } from 'vitest';
 import {
   type ChromeLike,
+  type FirefoxRequestDetails,
   type NativePort,
   WarrenBrowserVpn,
   WarrenExtensionError,
@@ -716,7 +717,7 @@ describe('WarrenBrowserVpn Firefox only-mode handlers', () => {
   /** A Firefox chrome whose onRequest handlers are all observable. */
   function firefoxWithHandlers(script: (req: HostRequest, port: FakePort) => void = healthyHost) {
     const base = fakeChrome(script, { control: ['controlled_by_this_extension'] });
-    const handlers = new Set<(req: { url: string; tabId?: number }) => unknown>();
+    const handlers = new Set<(req: FirefoxRequestDetails) => unknown>();
     const handlersAtSet: number[] = [];
     base.chrome.proxy.settings.set = () => {
       handlersAtSet.push(handlers.size);
@@ -775,17 +776,25 @@ describe('WarrenBrowserVpn Firefox only-mode handlers', () => {
     expect(handler!({ url: 'https://bank.example/' })).toEqual({ type: 'direct' });
   });
 
-  it('tunnels every request of a listed tab, third-party hosts included', async () => {
+  it('tunnels what a page of a listed site loads, third-party hosts included', async () => {
     const { chrome, handlers } = firefoxWithHandlers();
     const vpn = new WarrenBrowserVpn({ chrome, platform: 'firefox' });
-    await vpn.connect({ mnemonic: 'm', split: { mode: 'only', rules: [], tabs: [7] } });
+    await vpn.connect({
+      mnemonic: 'm',
+      split: { mode: 'only', rules: ['video.example'], pageResources: true },
+    });
     const [handler] = handlers;
+    const fromPage = (top: string) => ({
+      url: 'https://cdn.example/a.js',
+      documentUrl: 'https://embed.example/player',
+      frameAncestors: [{ url: top }],
+    });
 
-    expect(handler!({ url: 'https://cdn.example/a.js', tabId: 7 })).toMatchObject({
+    expect(handler!(fromPage('https://video.example/watch'))).toMatchObject({
       type: 'socks',
       port: 1080,
     });
-    expect(handler!({ url: 'https://cdn.example/a.js', tabId: 8 })).toEqual({ type: 'direct' });
+    expect(handler!(fromPage('https://news.example/'))).toEqual({ type: 'direct' });
   });
 
   it('leaves no handler behind after a reconnect over a dead host and a disconnect', async () => {

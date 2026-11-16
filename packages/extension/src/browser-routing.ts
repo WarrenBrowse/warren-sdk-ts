@@ -49,9 +49,11 @@ import { WarrenExtensionError } from './client.js';
 import type { ExtensionProxyAuth } from './protocol.js';
 import {
   FAIL_CLOSED_PROXY,
+  type FirefoxRequestDetails,
   LOCKDOWN_PROXY,
   type SplitTunnelConfig,
   buildChromiumLockdownValue,
+  pageHostOf,
   shouldTunnelRequest,
 } from './split.js';
 
@@ -204,7 +206,7 @@ export interface ProxyAuthSources {
 export interface FirefoxProxyLike {
   onRequest: {
     addListener(
-      listener: (request: { url: string; tabId?: number }) => unknown,
+      listener: (request: FirefoxRequestDetails) => unknown,
       filter: { urls: string[] },
     ): void;
   };
@@ -573,7 +575,7 @@ export function attachFirefoxRouting(
           ? { type: 'direct' }
           : FAIL_CLOSED_PROXY;
       }
-      if (!shouldTunnelRequest({ host, tabId: request.tabId }, state.split)) {
+      if (!shouldTunnelRequest({ host, pageHost: pageHostOf(request) }, state.split)) {
         return { type: 'direct' };
       }
       if (state.tier === 'multihop') {
