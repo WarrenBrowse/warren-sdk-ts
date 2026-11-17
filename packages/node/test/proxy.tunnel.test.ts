@@ -174,6 +174,7 @@ describe('ProxyTunnel fatal-cause surface (A4)', () => {
       'DeviceLimit',
       'PolicyRefused',
       'NoReachableEntry',
+      'ClockSkew',
     ] as const) {
       const tunnel = ProxyTunnel.create({
         mnemonic: 'x',

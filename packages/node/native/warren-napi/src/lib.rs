@@ -325,8 +325,9 @@ impl From<MapProtoJs> for MapProto {
 /// Why the self-healing supervisor gave up (state `"failed"` with a definitive
 /// cause), mirroring [`warren_sdk::transport::FatalCause`] across the boundary so
 /// the JS side can distinguish an unauthorized account, a device-limit rejection,
-/// an opaque policy refusal and a network that routes no entry relay instead of
-/// collapsing them to one "tunnel failed" kind and retrying a fatal forever. The engine owns this classification; this
+/// an opaque policy refusal, a network that routes no entry relay and a device
+/// clock two exits refused instead of collapsing them to one "tunnel failed"
+/// kind and retrying a fatal forever. The engine owns this classification; this
 /// binding maps, it never re-decides.
 ///
 /// Read via [`WarrenProxy::fatal_cause`]. A `"failed"` reached by mere retry
@@ -348,6 +349,10 @@ pub enum FatalCauseJs {
     /// the fleet is at fault: the user changes network, or unpins an entry
     /// country the network cannot reach.
     NoReachableEntry,
+    /// Two different exits refused this device's time for the session setup:
+    /// the device clock is wrong. The user sets the date and time to
+    /// automatic; renewing does not help.
+    ClockSkew,
 }
 
 impl From<FatalCause> for FatalCauseJs {
@@ -357,6 +362,7 @@ impl From<FatalCause> for FatalCauseJs {
             FatalCause::DeviceLimit => FatalCauseJs::DeviceLimit,
             FatalCause::PolicyRefused => FatalCauseJs::PolicyRefused,
             FatalCause::NoReachableEntry => FatalCauseJs::NoReachableEntry,
+            FatalCause::ClockSkew => FatalCauseJs::ClockSkew,
             // `FatalCause` is `#[non_exhaustive]`: an engine-added fatal we do not
             // yet name still crosses as a definitive refusal (never a false
             // "retryable"), matching the FFI's mapping.
@@ -1199,6 +1205,16 @@ mod tests {
         assert!(matches!(
             FatalCauseJs::from(FatalCause::NoReachableEntry),
             FatalCauseJs::NoReachableEntry
+        ));
+    }
+
+    #[test]
+    fn a_device_clock_two_exits_refused_crosses_as_its_own_kind_not_a_policy_refusal() {
+        // Read as a policy refusal, it tells the user their account was
+        // refused when the fix is setting the clock to automatic.
+        assert!(matches!(
+            FatalCauseJs::from(FatalCause::ClockSkew),
+            FatalCauseJs::ClockSkew
         ));
     }
 

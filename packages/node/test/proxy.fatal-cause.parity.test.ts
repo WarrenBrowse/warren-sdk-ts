@@ -37,6 +37,10 @@ describe('the fatal-cause vocabulary across the addon boundary', () => {
     expect(addon).toContain('NoReachableEntry');
   });
 
+  it('names a device clock two exits refused on the addon side', () => {
+    expect(addon).toContain('ClockSkew');
+  });
+
   it('types every cause the addon sends in the curated binding typings', () => {
     expect(tsUnionMembers(source('../native/warren-napi/index.d.ts'), 'FatalCauseJs')).toEqual(
       addon,

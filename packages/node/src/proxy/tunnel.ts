@@ -220,7 +220,13 @@ export type ProxyFatalCause =
    * fleet is at fault: change network, or unpin an entry country this network
    * cannot reach.
    */
-  | 'NoReachableEntry';
+  | 'NoReachableEntry'
+  /**
+   * Two different exits refused this device's time for the session setup: the
+   * device clock is wrong. Set the date and time to automatic, renewing does
+   * not help.
+   */
+  | 'ClockSkew';
 
 /**
  * Stable error codes carried by {@link WarrenProxyError}. The native codes
