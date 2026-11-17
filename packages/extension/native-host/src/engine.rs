@@ -56,7 +56,7 @@ pub fn map_client_error(e: &ClientError) -> HostError {
         ClientError::BadClock => {
             HostError::new(ErrorCode::BadClock, "system clock is before the Unix epoch")
         }
-        ClientError::DeviceRevoked => HostError::new(
+        ClientError::DeviceRevoked { .. } => HostError::new(
             ErrorCode::DeviceRevoked,
             "this device was disconnected from another device of the account",
         ),
@@ -77,9 +77,9 @@ pub fn map_sdk_error(e: &SdkError) -> HostError {
         SdkError::Api(ClientError::ServerStatus { status, .. }) => {
             HostError::new(ErrorCode::Api, format!("server returned status {status}"))
         }
-        SdkError::Api(inner @ (ClientError::DeviceRevoked | ClientError::DeviceLimitReached)) => {
-            map_client_error(inner)
-        }
+        SdkError::Api(
+            inner @ (ClientError::DeviceRevoked { .. } | ClientError::DeviceLimitReached),
+        ) => map_client_error(inner),
         SdkError::Api(inner) => HostError::new(ErrorCode::Api, map_client_error(inner).message),
         SdkError::Discovery(_)
         | SdkError::MultihopDirectory(_)
@@ -774,7 +774,10 @@ mod tests {
     #[test]
     fn a_device_refusal_crosses_as_its_own_code() {
         assert_eq!(
-            map_sdk_error(&SdkError::Api(ClientError::DeviceRevoked)).code,
+            map_sdk_error(&SdkError::Api(ClientError::DeviceRevoked {
+                revocation: None
+            }))
+            .code,
             ErrorCode::DeviceRevoked
         );
         assert_eq!(
@@ -782,7 +785,7 @@ mod tests {
             ErrorCode::DeviceLimit
         );
         assert_eq!(
-            map_client_error(&ClientError::DeviceRevoked).code,
+            map_client_error(&ClientError::DeviceRevoked { revocation: None }).code,
             ErrorCode::DeviceRevoked
         );
     }

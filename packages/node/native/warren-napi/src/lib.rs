@@ -52,7 +52,7 @@ fn map_client_error(e: ClientError) -> napi::Error {
         // The device registry's verdicts (warren-core doc 115) cross as their
         // own kinds: a revoked device stops and forgets its identity, a
         // capped account opens its device list. No retry heals either.
-        e @ ClientError::DeviceRevoked => err("device_revoked", e),
+        e @ ClientError::DeviceRevoked { .. } => err("device_revoked", e),
         e @ ClientError::DeviceLimitReached => err("device_limit", e),
         other => err("api", other),
     }
@@ -1165,7 +1165,7 @@ mod tests {
 
     #[test]
     fn a_device_refusal_crosses_as_its_own_kind() {
-        let revoked = map_client_error(ClientError::DeviceRevoked);
+        let revoked = map_client_error(ClientError::DeviceRevoked { revocation: None });
         assert!(
             revoked.reason.starts_with("device_revoked: "),
             "{}",
