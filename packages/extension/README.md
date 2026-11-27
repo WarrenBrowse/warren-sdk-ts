@@ -238,7 +238,7 @@ mkdir -p .cargo
 printf '%s\n' '[patch."https://github.com/WarrenBrowse/warren-sdk-rs.git"]' \
   'warren-sdk = { path = "../../../../warren-sdk-rs/crates/warren-sdk" }' > .cargo/config.toml
 cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
-WARREN_PRODUCT_ENV=beta cargo build --release
+WARREN_PRODUCT_ENV=beta cargo build --release --config ../../../scripts/macos-release-strip.toml   # on macOS, the strip dyld loads
 node validate-egress.mjs target/release/warren-host   # WARREN_MNEMONIC=... adds the live tunnel part
 ```
 

@@ -16,3 +16,6 @@ packages/extension/example/sdk-extension.js
 # any in-tree cargo output.
 packages/extension/native-host/.cargo/
 packages/extension/native-host/target/
+
+# Python bytecode the CI checkers leave next to themselves.
+__pycache__/

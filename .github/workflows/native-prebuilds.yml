@@ -140,8 +140,13 @@ jobs:
         working-directory: sdk-ts/packages/node/native/warren-napi
         run: |
           # --dts keeps the generated typings away from the curated index.d.ts
-          # (napi's default output path, left empty on cached builds).
-          pnpm --package=@napi-rs/cli dlx napi build --release --platform --target ${{ matrix.target }} --dts index.generated.d.ts
+          # (napi's default output path, left empty on cached builds). napi
+          # hands what follows `--` to cargo: on darwin, Apple's linker strips
+          # the addon instead of rustc's rust-objcopy, whose string table the
+          # dyld of macOS 27 refuses (scripts/macos-release-strip.toml, inert
+          # on the Linux leg).
+          pnpm --package=@napi-rs/cli dlx napi build --release --platform --target ${{ matrix.target }} --dts index.generated.d.ts \
+            -- --config "$GITHUB_WORKSPACE/sdk-ts/scripts/macos-release-strip.toml"
           ls -la *.node
       # napi suffixes some triples with the ABI (linux-x64-gnu, win32-x64-msvc);
       # normalize to the loader's `<process.platform>-<process.arch>` name.
@@ -155,6 +160,16 @@ jobs:
             mv "$src" "warren-napi.${{ matrix.name }}.node"
           fi
           ls -la warren-napi.${{ matrix.name }}.node
+      # The addon is a library Node dlopens, so a layout dyld refuses fails
+      # every require() of it: refuse it here, then load it for real.
+      - name: dyld loads the addon
+        if: matrix.name == 'darwin-arm64'
+        shell: bash
+        working-directory: sdk-ts/packages/node/native/warren-napi
+        run: |
+          set -euo pipefail
+          python3 -I "$GITHUB_WORKSPACE/sdk-ts/scripts/ci/check-macho-loadable.py" warren-napi.darwin-arm64.node
+          node -e "require('./warren-napi.darwin-arm64.node')"
       # Node-based publish: Actions artifacts are unusable (org storage quota).
       # (The wclaude launcher moved to its own repo WarrenBrowse/wclaude with
       # its own build workflow.)

@@ -73,6 +73,13 @@ jobs:
         if: matrix.name == 'linux'
         shell: bash
         run: bash scripts/ci/codemagic/test-watchdog.sh
+      # The checker release-host.yml and native-prebuilds.yml run on every
+      # macOS binary they ship; its suite fakes Apple's validator, so it runs
+      # here.
+      - name: Mach-O loadability checker tests
+        if: matrix.name == 'linux'
+        shell: bash
+        run: python3 -I scripts/ci/test_check_macho_loadable.py
       - name: Fetch the golden-vectors submodule
         shell: bash
         env:

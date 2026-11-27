@@ -72,7 +72,9 @@ Requires the Rust toolchain and a sibling `../warren-sdk-rs` checkout (and
 
 ```bash
 cd packages/node/native/warren-napi
-CARGO_TARGET_DIR=../../../../../warren-sdk-rs/target pnpm --package=@napi-rs/cli dlx napi build --release
+# --config: on macOS, the strip dyld loads (scripts/macos-release-strip.toml).
+CARGO_TARGET_DIR=../../../../../warren-sdk-rs/target pnpm --package=@napi-rs/cli dlx napi build --release \
+  -- --config ../../../../scripts/macos-release-strip.toml
 ```
 
 ### Live validations (rooted / real exit)

@@ -49,7 +49,11 @@ cat > .cargo/config.toml <<'EOF'
 warren-sdk = { path = "../../../../../warren-sdk-rs/crates/warren-sdk" }
 EOF
 # Reuse the engine's target cache to skip recompiling its dependency tree.
-CARGO_TARGET_DIR=../../../../../warren-sdk-rs/target pnpm --package=@napi-rs/cli dlx napi build --release --dts index.generated.d.ts
+# On macOS the --config after `--` (handed to cargo) makes Apple's linker strip
+# the addon: the dyld of macOS 27 refuses rustc's own strip of a library built
+# against the 27 SDK (the repo's scripts/macos-release-strip.toml says why).
+CARGO_TARGET_DIR=../../../../../warren-sdk-rs/target pnpm --package=@napi-rs/cli dlx napi build --release --dts index.generated.d.ts \
+  -- --config ../../../../scripts/macos-release-strip.toml
 ```
 
 This emits `warren-napi.node` next to `index.cjs`. The loader finds it

@@ -231,12 +231,17 @@ jobs:
             fi
           }
           bin() { echo "${CARGO_TARGET_DIR:-target}/$1/release/warren-host"; }
+          # Apple's linker strips the macOS binaries instead of rustc's
+          # rust-objcopy, whose string table the dyld of macOS 27 refuses
+          # (scripts/macos-release-strip.toml). Its rustflags only match Apple
+          # targets, so the file is inert on the Linux lanes.
+          strip_cfg="$GITHUB_WORKSPACE/sdk-ts/scripts/macos-release-strip.toml"
           rm -f "$(bin "$TARGET")"
-          cargo_ci cargo test --locked --release --target "$TARGET"
-          cargo_ci cargo build --locked --release --target "$TARGET"
+          cargo_ci cargo test --locked --release --target "$TARGET" --config "$strip_cfg"
+          cargo_ci cargo build --locked --release --target "$TARGET" --config "$strip_cfg"
           if [ -n "$EXTRA_TARGET" ]; then
             rm -f "$(bin "$EXTRA_TARGET")"
-            cargo_ci cargo build --locked --release --target "$EXTRA_TARGET"
+            cargo_ci cargo build --locked --release --target "$EXTRA_TARGET" --config "$strip_cfg"
           fi
           main="$(bin "$TARGET")"
           test -f "$main" || { echo "::error::no binary at $main"; exit 1; }
@@ -257,6 +262,13 @@ jobs:
             macos)
               sh scripts/build-macos-pkg.sh "$main" "$(bin "$EXTRA_TARGET")" "$VERSION" "$out"
               arch -x86_64 "$out/warren-host-macos-universal" --version
+              # Both assets users download must hold binaries dyld loads: the
+              # universal binary, and the copy the pkg's postinstall runs.
+              python3 -I "$GITHUB_WORKSPACE/sdk-ts/scripts/ci/check-macho-loadable.py" "$out/warren-host-macos-universal"
+              pkg_check="$(mktemp -d)"
+              pkgutil --expand-full "$out/Warren-Helper.pkg" "$pkg_check/pkg"
+              python3 -I "$GITHUB_WORKSPACE/sdk-ts/scripts/ci/check-macho-loadable.py" "$pkg_check/pkg"
+              rm -rf "$pkg_check"
               ;;
             linux-x86_64) cp "$main" "$out/warren-host-linux-x86_64" ;;
             linux-aarch64) cp "$main" "$out/warren-host-linux-aarch64" ;;

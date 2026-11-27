@@ -1,0 +1,20 @@
+# Passed with `cargo --config <path to this file>` by every release build of a
+# binary that ships on macOS: warren-host (release-host.yml) and the napi-rs
+# addon (native-prebuilds.yml, where `napi build` hands it on to cargo).
+#
+# rustc strips Apple binaries with rust-objcopy (llvm-objcopy): with
+# `strip = true` (warren-host) and with the default release `strip =
+# "debuginfo"` (the addon) alike. It can leave the string table on a 4-byte
+# boundary. The dyld of macOS 27 refuses to load a library with that layout
+# when it was built against the 27 SDK: warren-app beta 1.1.60 shipped such a
+# native module and it never loaded, and the addon is such a library.
+# Executables with the layout still launch, but Apple's validator refuses
+# them. Apple's linker emits a well-formed table, so it does the stripping
+# instead: -x drops the local symbols (the most a dylib can lose, as
+# `strip -x`), -S the debug map and the build paths it records.
+#
+# Not in a .cargo/config.toml: there it would strip the debug builds lldb
+# reads. scripts/ci/check-macho-loadable.py refuses a release that still
+# carries the defect.
+[target.'cfg(target_vendor = "apple")']
+rustflags = ["-Cstrip=none", "-Clink-arg=-Wl,-x,-S"]
