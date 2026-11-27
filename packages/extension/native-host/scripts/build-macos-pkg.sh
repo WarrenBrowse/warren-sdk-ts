@@ -25,7 +25,10 @@ mkdir -p "$out"
 universal="$out/warren-host-macos-universal"
 lipo -create "$arm64" "$x86_64" -output "$universal"
 chmod 755 "$universal"
-lipo "$universal" -verify_arch arm64 x86_64
+# One arch per call: the lipo of Xcode 27 reads a second one as an input file
+# and refuses ("-verify_arch requires exactly one input file").
+lipo "$universal" -verify_arch arm64
+lipo "$universal" -verify_arch x86_64
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT INT TERM
